@@ -18,7 +18,6 @@ import {
   buildSegmentStats,
   deriveAutoSegment,
   exportMembersCsv,
-  loadManualSegments,
   saveManualSegment,
   type MemberSegment,
 } from "../../lib/member-lifecycle";
@@ -26,14 +25,14 @@ import {
 const baseSegments: Array<MemberSegment | "Manual"> = ["High Value", "Active", "At Risk", "Inactive", "Manual"];
 
 export default function AdminMembersPage() {
-  const { members, loading, error, refetch } = useAdminData();
+  const { members, transactions, loading, error, refetch } = useAdminData();
   const [query, setQuery] = useState("");
   const [awardingMember, setAwardingMember] = useState<string | null>(null);
   const [selectedMember, setSelectedMember] = useState<(typeof members)[number] | null>(null);
   const [manualAwardMember, setManualAwardMember] = useState<(typeof members)[number] | null>(null);
   const [awardPoints, setAwardPoints] = useState("");
   const [awardReason, setAwardReason] = useState("");
-  const [manualSegmentDraft, setManualSegmentDraft] = useState<Record<string, string>>(() => loadManualSegments());
+  const [manualSegmentDraft, setManualSegmentDraft] = useState<Record<string, string>>({});
   const [segmentFilter, setSegmentFilter] = useState<string>("All");
 
   const closeManualAwardDialog = () => {
@@ -76,10 +75,22 @@ export default function AdminMembersPage() {
   };
 
   const segmentedMembers = useMemo(() => {
+    const latestTxByMember = new Map<string, string>();
+    for (const tx of transactions) {
+      const key = String(tx.member_id || "");
+      const at = String(tx.transaction_date || "");
+      if (!key || !at) continue;
+      const existing = latestTxByMember.get(key);
+      if (!existing || new Date(at).getTime() > new Date(existing).getTime()) {
+        latestTxByMember.set(key, at);
+      }
+    }
+
     const byMember = members.map((member) => {
       const key = String(member.member_id || member.id || member.member_number);
-      const manual = manualSegmentDraft[key];
-      const auto = deriveAutoSegment(member);
+      const manual = manualSegmentDraft[key] || member.manual_segment || "";
+      const lastActivity = latestTxByMember.get(String(member.id || member.member_id || ""));
+      const auto = deriveAutoSegment(member, lastActivity);
       return {
         ...member,
         autoSegment: auto,
@@ -89,7 +100,7 @@ export default function AdminMembersPage() {
     });
 
     return byMember;
-  }, [members, manualSegmentDraft]);
+  }, [members, transactions, manualSegmentDraft]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -107,11 +118,15 @@ export default function AdminMembersPage() {
 
   const stats = useMemo(() => buildSegmentStats(segmentedMembers.length, segmentedMembers.map((m) => m.segment)), [segmentedMembers]);
 
-  const handleManualSegmentSave = (memberId: string, value: string) => {
-    if (!value.trim()) return;
-    saveManualSegment(memberId, value);
-    setManualSegmentDraft((prev) => ({ ...prev, [memberId]: value.trim() }));
-    toast.success("Manual segment saved.");
+  const handleManualSegmentSave = async (memberNumber: string, memberId: string, value: string) => {
+    try {
+      const saved = await saveManualSegment(memberNumber, value);
+      setManualSegmentDraft((prev) => ({ ...prev, [memberId]: saved }));
+      await refetch();
+      toast.success("Manual segment saved.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save manual segment.");
+    }
   };
 
   const handleExport = () => {
@@ -245,12 +260,18 @@ export default function AdminMembersPage() {
                     <td className="py-4 px-4 text-sm text-gray-600">
                       <div className="flex items-center gap-2">
                         <Input
-                          value={manualSegmentDraft[key] || ""}
+                          value={manualSegmentDraft[key] || member.manual_segment || ""}
                           onChange={(e) => setManualSegmentDraft((prev) => ({ ...prev, [key]: e.target.value }))}
-                          placeholder="e.g. VIP Retail"
+                          placeholder="High Value | Active | At Risk | Inactive"
                           className="h-8 text-xs"
                         />
-                        <Button variant="outline" className="h-8 text-xs" onClick={() => handleManualSegmentSave(key, manualSegmentDraft[key] || "")}>Save</Button>
+                        <Button
+                          variant="outline"
+                          className="h-8 text-xs"
+                          onClick={() => handleManualSegmentSave(member.member_number, key, manualSegmentDraft[key] || member.manual_segment || "")}
+                        >
+                          Save
+                        </Button>
                       </div>
                     </td>
                     <td className="py-4 px-4">

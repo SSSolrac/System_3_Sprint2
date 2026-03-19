@@ -3,8 +3,6 @@ import type { Member } from "../admin-panel/types";
 import type { MemberData } from "../types/loyalty";
 
 const STORAGE_KEYS = {
-  manualSegments: "centralperk-manual-segments-v1",
-  communicationPrefs: "centralperk-communication-prefs-v1",
   referrals: "centralperk-referrals-v1",
   birthdayClaims: "centralperk-birthday-claims-v1",
   feedback: "centralperk-feedback-v1",
@@ -80,19 +78,37 @@ function daysSince(value?: string | null) {
 export function deriveAutoSegment(member: Member, lastActivityDate?: string | null): MemberSegment {
   const balance = Number(member.points_balance || 0);
   const inactiveDays = daysSince(lastActivityDate ?? member.enrollment_date);
-  if (balance >= 2500) return "High Value";
+  const tier = String(member.tier || "Bronze").toLowerCase();
+  if (balance >= 2500 || (tier === "gold" && balance >= 1200)) return "High Value";
   if (inactiveDays <= 30) return "Active";
   if (inactiveDays <= 90) return "At Risk";
   return "Inactive";
 }
 
-export function loadManualSegments(): Record<string, string> {
-  return loadJson<Record<string, string>>(STORAGE_KEYS.manualSegments, {});
+function normalizeManualSegment(value: string): MemberSegment | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "high value") return "High Value";
+  if (normalized === "active") return "Active";
+  if (normalized === "at risk") return "At Risk";
+  if (normalized === "inactive") return "Inactive";
+  return null;
 }
 
-export function saveManualSegment(memberId: string, segmentName: string) {
-  const next = { ...loadManualSegments(), [memberId]: segmentName.trim() };
-  saveJson(STORAGE_KEYS.manualSegments, next);
+export async function saveManualSegment(memberNumber: string, segmentName: string) {
+  const normalized = normalizeManualSegment(segmentName);
+  if (!normalized) throw new Error("Manual segment must be one of: High Value, Active, At Risk, Inactive.");
+
+  const result = await supabase
+    .from("loyalty_members")
+    .update({ manual_segment: normalized })
+    .eq("member_number", memberNumber)
+    .select("member_number")
+    .limit(1)
+    .maybeSingle();
+  if (result.error) throw result.error;
+  if (!result.data) throw new Error("Member not found for manual segment update.");
+
+  return normalized;
 }
 
 export function exportMembersCsv(rows: Array<{ memberNumber: string; name: string; email: string; phone: string; segment: string }>) {
@@ -138,7 +154,7 @@ export function buildSegmentStats(totalMembers: number, segments: string[]): Seg
   }));
 }
 
-const defaultPreferences: CommunicationPreference = {
+export const defaultCommunicationPreference: CommunicationPreference = {
   sms: true,
   email: true,
   push: true,
@@ -146,24 +162,81 @@ const defaultPreferences: CommunicationPreference = {
   frequency: "weekly",
 };
 
-export function loadCommunicationPreference(memberId: string): CommunicationPreference {
-  const all = loadJson<Record<string, CommunicationPreference>>(STORAGE_KEYS.communicationPrefs, {});
-  return all[memberId] || defaultPreferences;
+function toCommunicationPreference(row?: Record<string, unknown> | null): CommunicationPreference {
+  if (!row) return defaultCommunicationPreference;
+  const frequency = String(row.communication_frequency || "weekly").toLowerCase();
+  return {
+    sms: Boolean(row.sms_enabled ?? true),
+    email: Boolean(row.email_enabled ?? true),
+    push: Boolean(row.push_enabled ?? true),
+    promotionalOptIn: Boolean(row.promotional_opt_in ?? true),
+    frequency: frequency === "daily" || frequency === "never" ? frequency : "weekly",
+  };
 }
 
-export function saveCommunicationPreference(memberId: string, preference: CommunicationPreference) {
-  const all = loadJson<Record<string, CommunicationPreference>>(STORAGE_KEYS.communicationPrefs, {});
-  all[memberId] = preference;
-  saveJson(STORAGE_KEYS.communicationPrefs, all);
+export async function loadCommunicationPreference(memberId: string, fallbackEmail?: string): Promise<CommunicationPreference> {
+  let lookup = await supabase
+    .from("loyalty_members")
+    .select("sms_enabled,email_enabled,push_enabled,promotional_opt_in,communication_frequency")
+    .eq("member_number", memberId)
+    .limit(1)
+    .maybeSingle();
+
+  if (lookup.error) throw lookup.error;
+
+  if (!lookup.data && fallbackEmail) {
+    lookup = await supabase
+      .from("loyalty_members")
+      .select("sms_enabled,email_enabled,push_enabled,promotional_opt_in,communication_frequency")
+      .ilike("email", fallbackEmail)
+      .limit(1)
+      .maybeSingle();
+    if (lookup.error) throw lookup.error;
+  }
+
+  return toCommunicationPreference(lookup.data as Record<string, unknown> | null);
 }
 
-export function canSendNotification(memberId: string, channel: "sms" | "email" | "push", isTransactional: boolean) {
-  const pref = loadCommunicationPreference(memberId);
+export async function saveCommunicationPreference(memberId: string, preference: CommunicationPreference, fallbackEmail?: string) {
+  const payload = {
+    sms_enabled: Boolean(preference.sms),
+    email_enabled: Boolean(preference.email),
+    push_enabled: Boolean(preference.push),
+    promotional_opt_in: Boolean(preference.promotionalOptIn),
+    communication_frequency: preference.frequency,
+  };
+
+  let update = await supabase
+    .from("loyalty_members")
+    .update(payload)
+    .eq("member_number", memberId)
+    .select("member_number")
+    .limit(1)
+    .maybeSingle();
+  if (update.error) throw update.error;
+
+  if (!update.data && fallbackEmail) {
+    update = await supabase
+      .from("loyalty_members")
+      .update(payload)
+      .ilike("email", fallbackEmail)
+      .select("member_number")
+      .limit(1)
+      .maybeSingle();
+    if (update.error) throw update.error;
+  }
+}
+
+export function canSendNotificationByPreference(
+  pref: CommunicationPreference,
+  channel: "sms" | "email" | "push",
+  isTransactional: boolean
+) {
   if (isTransactional) {
     return channel === "sms" ? pref.sms : channel === "email" ? pref.email : pref.push;
   }
 
-  if (!pref.promotionalOptIn || pref.frequency === "never") return false;
+  if (!pref.promotionalOptIn) return false;
   return channel === "sms" ? pref.sms : channel === "email" ? pref.email : pref.push;
 }
 

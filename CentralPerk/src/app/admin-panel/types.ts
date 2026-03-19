@@ -9,6 +9,12 @@ export interface Member {
   enrollment_date: string;
   points_balance?: number;
   tier?: string;
+  manual_segment?: "High Value" | "Active" | "At Risk" | "Inactive" | null;
+  sms_enabled?: boolean;
+  email_enabled?: boolean;
+  push_enabled?: boolean;
+  promotional_opt_in?: boolean;
+  communication_frequency?: "daily" | "weekly" | "never";
 }
 
 export interface LoyaltyTransaction {

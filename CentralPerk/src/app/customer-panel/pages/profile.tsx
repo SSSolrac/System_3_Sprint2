@@ -43,7 +43,13 @@ export default function Profile() {
   const [otpInput, setOtpInput] = useState("");
   const [pendingSave, setPendingSave] = useState(false);
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
-  const [preferences, setPreferences] = useState<CommunicationPreference>(() => loadCommunicationPreference(user.memberId));
+  const [preferences, setPreferences] = useState<CommunicationPreference>({
+    sms: true,
+    email: true,
+    push: true,
+    promotionalOptIn: true,
+    frequency: "weekly",
+  });
 
   const [tierMinimums, setTierMinimums] = useState({
     Bronze: 0,
@@ -52,7 +58,10 @@ export default function Profile() {
   });
 
   useEffect(() => {
-    setPreferences(loadCommunicationPreference(user.memberId));
+    loadCommunicationPreference(user.memberId, user.email)
+      .then(setPreferences)
+      .catch(() => {
+      });
     setFormData({
       fullName: user.fullName,
       email: user.email,
@@ -197,9 +206,13 @@ export default function Profile() {
   };
 
 
-  const savePreferences = () => {
-    saveCommunicationPreference(user.memberId, preferences);
-    toast.success("Communication preferences saved.");
+  const savePreferences = async () => {
+    try {
+      await saveCommunicationPreference(user.memberId, preferences, user.email);
+      toast.success("Communication preferences saved.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save communication preferences.");
+    }
   };
 
   const tierBenefits: Record<"Bronze" | "Silver" | "Gold", string[]> = {

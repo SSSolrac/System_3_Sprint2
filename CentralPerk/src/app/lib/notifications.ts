@@ -1,5 +1,5 @@
 import { supabase } from "../../utils/supabase/client";
-import { canSendNotification } from "./member-lifecycle";
+import { canSendNotificationByPreference, loadCommunicationPreference } from "./member-lifecycle";
 
 export type AppNotification = {
   id: string;
@@ -64,7 +64,8 @@ export async function queueMemberNotification(input: {
   message: string;
   isTransactional?: boolean;
 }) {
-  const allowed = canSendNotification(input.memberId, input.channel, Boolean(input.isTransactional));
+  const pref = await loadCommunicationPreference(input.memberId);
+  const allowed = canSendNotificationByPreference(pref, input.channel, Boolean(input.isTransactional));
   if (!allowed) return { queued: false, reason: "preference_blocked" as const };
 
   const { error } = await supabase.from("notification_outbox").insert({
@@ -72,6 +73,7 @@ export async function queueMemberNotification(input: {
     channel: input.channel,
     subject: input.subject,
     message: input.message,
+    is_promotional: !Boolean(input.isTransactional),
   });
 
   if (error) throw error;
