@@ -65,15 +65,30 @@ export async function queueMemberNotification(input: {
   isTransactional?: boolean;
 }) {
   const pref = await loadCommunicationPreference(input.memberId);
-  const allowed = canSendNotificationByPreference(pref, input.channel, Boolean(input.isTransactional));
+  const isTransactional = Boolean(input.isTransactional);
+  const allowed = canSendNotificationByPreference(pref, input.channel, isTransactional);
   if (!allowed) return { queued: false, reason: "preference_blocked" as const };
+
+  if (!isTransactional && input.userId && pref.frequency !== "daily") {
+    const lookbackDays = pref.frequency === "weekly" ? 7 : 1;
+    const since = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
+    const recentRes = await supabase
+      .from("notification_outbox")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", input.userId)
+      .eq("channel", input.channel)
+      .eq("is_promotional", true)
+      .gte("created_at", since);
+    if (recentRes.error) throw recentRes.error;
+    if ((recentRes.count || 0) > 0) return { queued: false, reason: "frequency_blocked" as const };
+  }
 
   const { error } = await supabase.from("notification_outbox").insert({
     user_id: input.userId ?? null,
     channel: input.channel,
     subject: input.subject,
     message: input.message,
-    is_promotional: !Boolean(input.isTransactional),
+    is_promotional: !isTransactional,
   });
 
   if (error) throw error;

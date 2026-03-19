@@ -1,12 +1,6 @@
 import { supabase } from "../../utils/supabase/client";
 import type { MemberData } from "../types/loyalty";
 
-const STORAGE_KEYS = {
-  referrals: "centralperk-referrals-v1",
-  birthdayClaims: "centralperk-birthday-claims-v1",
-  feedback: "centralperk-feedback-v1",
-} as const;
-
 export type MemberSegment = "High Value" | "Active" | "At Risk" | "Inactive";
 
 export interface SegmentStats {
@@ -32,6 +26,7 @@ export interface ReferralRecord {
   status: "pending" | "joined";
   createdAt: string;
   convertedAt?: string;
+  bonusAwarded?: boolean;
 }
 
 export interface FeedbackRecord {
@@ -42,29 +37,12 @@ export interface FeedbackRecord {
   rating: 1 | 2 | 3 | 4 | 5;
   comment: string;
   contactOptIn: boolean;
+  contactInfo: string | null;
   createdAt: string;
 }
 
 function safeWindow() {
   return typeof window === "undefined" ? null : window;
-}
-
-function loadJson<T>(key: string, fallback: T): T {
-  const win = safeWindow();
-  if (!win) return fallback;
-  try {
-    const raw = win.localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-function saveJson<T>(key: string, data: T) {
-  const win = safeWindow();
-  if (!win) return;
-  win.localStorage.setItem(key, JSON.stringify(data));
 }
 
 function normalizeManualSegment(value: string): MemberSegment | null {
@@ -215,57 +193,123 @@ export function canSendNotificationByPreference(
   isTransactional: boolean
 ) {
   if (isTransactional) {
-    return channel === "sms" ? pref.sms : channel === "email" ? pref.email : pref.push;
+    return true;
   }
 
+  if (pref.frequency === "never") return false;
   if (!pref.promotionalOptIn) return false;
   return channel === "sms" ? pref.sms : channel === "email" ? pref.email : pref.push;
 }
 
 export function buildReferralCode(member: Pick<MemberData, "memberId" | "fullName">) {
-  const token = member.fullName
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() || "X")
-    .join("");
-  return `${token}${member.memberId.slice(-4).toUpperCase()}`;
+  return `REF${member.memberId.replace(/\D/g, "").slice(-6).padStart(6, "0")}`;
 }
 
-export function loadReferrals(): ReferralRecord[] {
-  return loadJson<ReferralRecord[]>(STORAGE_KEYS.referrals, []);
-}
-
-export function createReferral(input: { referrerMemberId: string; referrerCode: string; refereeEmail: string }) {
-  const records = loadReferrals();
-  const record: ReferralRecord = {
-    id: crypto.randomUUID(),
-    referrerMemberId: input.referrerMemberId,
-    referrerCode: input.referrerCode,
-    refereeEmail: input.refereeEmail.trim().toLowerCase(),
-    status: "pending",
-    createdAt: new Date().toISOString(),
-  };
-  records.unshift(record);
-  saveJson(STORAGE_KEYS.referrals, records);
-  return record;
-}
-
-export async function markReferralJoined(input: { referralCode: string; refereeMemberId: string; refereeEmail: string }) {
-  const email = input.refereeEmail.trim().toLowerCase();
-  const records = loadReferrals();
-  const matched = records.find((item) => item.referrerCode === input.referralCode && item.refereeEmail === email && item.status === "pending");
-  if (!matched) return null;
-
-  matched.status = "joined";
-  matched.refereeMemberId = input.refereeMemberId;
-  matched.convertedAt = new Date().toISOString();
-  saveJson(STORAGE_KEYS.referrals, records);
-
+function normalizeReferralRow(row: Record<string, unknown>): ReferralRecord {
   return {
-    referrerPoints: 500,
-    refereePoints: 200,
-    referrerMemberId: matched.referrerMemberId,
+    id: String(row.id ?? crypto.randomUUID()),
+    referrerMemberId: String(row.referrer_member_number ?? row.referrer_member_id ?? ""),
+    referrerCode: String(row.referrer_code ?? ""),
+    refereeEmail: String(row.referee_email ?? ""),
+    refereeMemberId: row.referee_member_number ? String(row.referee_member_number) : undefined,
+    status: String(row.status || "pending") === "joined" ? "joined" : "pending",
+    createdAt: String(row.created_at ?? new Date().toISOString()),
+    convertedAt: row.converted_at ? String(row.converted_at) : undefined,
+    bonusAwarded: Boolean(row.bonus_awarded),
+  };
+}
+
+export async function loadReferrals(memberNumber: string): Promise<ReferralRecord[]> {
+  const { data, error } = await supabase
+    .from("member_referrals")
+    .select("id,referrer_code,referee_email,status,created_at,converted_at,bonus_awarded,referrer_member_id,referee_member_id,referrer:referrer_member_id(member_number),referee:referee_member_id(member_number)")
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+
+  return (data || [])
+    .map((row) => {
+      const record = row as Record<string, unknown>;
+      const referrer = (record.referrer as Record<string, unknown> | null) ?? null;
+      const referee = (record.referee as Record<string, unknown> | null) ?? null;
+      return normalizeReferralRow({
+        ...record,
+        referrer_member_number: referrer?.member_number,
+        referee_member_number: referee?.member_number,
+      });
+    })
+    .filter((row) => row.referrerMemberId === memberNumber || row.refereeMemberId === memberNumber);
+}
+
+export async function loadAllReferrals(): Promise<ReferralRecord[]> {
+  const { data, error } = await supabase
+    .from("member_referrals")
+    .select("id,referrer_code,referee_email,status,created_at,converted_at,bonus_awarded,referrer_member_id,referee_member_id,referrer:referrer_member_id(member_number),referee:referee_member_id(member_number)")
+    .order("created_at", { ascending: false })
+    .limit(500);
+  if (error) throw error;
+  return (data || []).map((row) => {
+    const record = row as Record<string, unknown>;
+    const referrer = (record.referrer as Record<string, unknown> | null) ?? null;
+    const referee = (record.referee as Record<string, unknown> | null) ?? null;
+    return normalizeReferralRow({
+      ...record,
+      referrer_member_number: referrer?.member_number,
+      referee_member_number: referee?.member_number,
+    });
+  });
+}
+
+export async function createReferral(input: { referrerMemberId: string; refereeEmail: string }) {
+  const { data, error } = await supabase.rpc("loyalty_create_referral_invite", {
+    p_referrer_member_number: input.referrerMemberId,
+    p_referee_email: input.refereeEmail.trim().toLowerCase(),
+  });
+  if (error) throw error;
+  return normalizeReferralRow((data ?? {}) as Record<string, unknown>);
+}
+
+export async function getMemberReferralCode(memberId: string, fallbackEmail?: string): Promise<string> {
+  let lookup = await supabase
+    .from("loyalty_members")
+    .select("member_number,referral_code")
+    .eq("member_number", memberId)
+    .limit(1)
+    .maybeSingle();
+  if (lookup.error) throw lookup.error;
+
+  if (!lookup.data && fallbackEmail) {
+    lookup = await supabase
+      .from("loyalty_members")
+      .select("member_number,referral_code")
+      .ilike("email", fallbackEmail)
+      .limit(1)
+      .maybeSingle();
+    if (lookup.error) throw lookup.error;
+  }
+
+  const memberNumber = String(lookup.data?.member_number ?? memberId);
+  const existing = String(lookup.data?.referral_code ?? "").trim();
+  return existing || buildReferralCode({ memberId: memberNumber, fullName: "" } as Pick<MemberData, "memberId" | "fullName">);
+}
+
+export async function applyReferralCodeForSignup(input: {
+  referralCode: string;
+  refereeMemberId: string;
+  refereeEmail: string;
+}) {
+  const { data, error } = await supabase.rpc("loyalty_apply_referral", {
+    p_referral_code: input.referralCode.trim(),
+    p_referee_member_number: input.refereeMemberId,
+    p_referee_email: input.refereeEmail.trim().toLowerCase(),
+  });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  const applied = Boolean((row as Record<string, unknown> | undefined)?.applied);
+  return {
+    applied,
+    referrerPoints: Number((row as Record<string, unknown> | undefined)?.referrer_points ?? 0),
+    refereePoints: Number((row as Record<string, unknown> | undefined)?.referee_points ?? 0),
+    referrerMemberId: String((row as Record<string, unknown> | undefined)?.referrer_member_number ?? ""),
   };
 }
 
@@ -282,35 +326,169 @@ export function isBirthdayMonth(member: Pick<MemberData, "birthdate">) {
   return d.getMonth() === new Date().getMonth();
 }
 
-export function hasBirthdayClaimedThisYear(memberId: string) {
-  const claims = loadJson<Record<string, number>>(STORAGE_KEYS.birthdayClaims, {});
-  return claims[memberId] === new Date().getFullYear();
+export async function hasBirthdayClaimedThisYear(memberId: string, fallbackEmail?: string) {
+  const currentYear = new Date().getFullYear();
+  let memberLookup = await supabase
+    .from("loyalty_members")
+    .select("id")
+    .eq("member_number", memberId)
+    .limit(1)
+    .maybeSingle();
+  if (memberLookup.error) throw memberLookup.error;
+  if (!memberLookup.data && fallbackEmail) {
+    memberLookup = await supabase
+      .from("loyalty_members")
+      .select("id")
+      .ilike("email", fallbackEmail)
+      .limit(1)
+      .maybeSingle();
+    if (memberLookup.error) throw memberLookup.error;
+  }
+  if (!memberLookup.data?.id) return false;
+
+  const lookup = await supabase
+    .from("member_birthday_rewards")
+    .select("id")
+    .eq("member_id", memberLookup.data.id)
+    .eq("reward_year", currentYear)
+    .limit(1)
+    .maybeSingle();
+  if (lookup.error) throw lookup.error;
+  return Boolean(lookup.data?.id);
 }
 
-export function markBirthdayClaimed(memberId: string) {
-  const claims = loadJson<Record<string, number>>(STORAGE_KEYS.birthdayClaims, {});
-  claims[memberId] = new Date().getFullYear();
-  saveJson(STORAGE_KEYS.birthdayClaims, claims);
+export async function claimBirthdayReward(memberId: string, fallbackEmail?: string) {
+  const { data, error } = await supabase.rpc("loyalty_claim_birthday_reward", {
+    p_member_number: memberId,
+    p_fallback_email: fallbackEmail ?? null,
+  });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  return {
+    granted: Boolean((row as Record<string, unknown> | undefined)?.granted),
+    pointsAwarded: Number((row as Record<string, unknown> | undefined)?.points_awarded ?? 0),
+    voucherCode: (row as Record<string, unknown> | undefined)?.voucher_code
+      ? String((row as Record<string, unknown>)?.voucher_code)
+      : null,
+  };
 }
 
-export function submitFeedback(entry: Omit<FeedbackRecord, "id" | "createdAt">) {
-  const record: FeedbackRecord = { ...entry, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
-  const rows = loadJson<FeedbackRecord[]>(STORAGE_KEYS.feedback, []);
-  rows.unshift(record);
-  saveJson(STORAGE_KEYS.feedback, rows);
-  return record;
+export async function loadBirthdayRewardStatus(memberId: string, fallbackEmail?: string) {
+  const currentYear = new Date().getFullYear();
+  let memberLookup = await supabase
+    .from("loyalty_members")
+    .select("id")
+    .eq("member_number", memberId)
+    .limit(1)
+    .maybeSingle();
+  if (memberLookup.error) throw memberLookup.error;
+  if (!memberLookup.data && fallbackEmail) {
+    memberLookup = await supabase
+      .from("loyalty_members")
+      .select("id")
+      .ilike("email", fallbackEmail)
+      .limit(1)
+      .maybeSingle();
+    if (memberLookup.error) throw memberLookup.error;
+  }
+  if (!memberLookup.data?.id) return { hasReward: false, voucherCode: null as string | null, pointsAwarded: 0, badgeLabel: null as string | null };
+
+  const { data, error } = await supabase
+    .from("member_birthday_rewards")
+    .select("points_awarded,voucher_code,voucher_expires_at")
+    .eq("member_id", memberLookup.data.id)
+    .eq("reward_year", currentYear)
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return { hasReward: false, voucherCode: null as string | null, pointsAwarded: 0, badgeLabel: null as string | null };
+  return {
+    hasReward: true,
+    voucherCode: String(data.voucher_code ?? ""),
+    pointsAwarded: Number(data.points_awarded ?? 0),
+    voucherExpiresAt: String(data.voucher_expires_at ?? ""),
+    badgeLabel: "Birthday Celebrant",
+  };
 }
 
-export function loadFeedback(): FeedbackRecord[] {
-  return loadJson<FeedbackRecord[]>(STORAGE_KEYS.feedback, []);
+const feedbackCategories = new Set<FeedbackRecord["category"]>(["points", "rewards", "service", "app"]);
+
+function normalizeFeedbackRow(row: Record<string, unknown>): FeedbackRecord {
+  const category = String(row.category || "service").toLowerCase() as FeedbackRecord["category"];
+  const rating = Math.max(1, Math.min(5, Number(row.rating) || 5)) as FeedbackRecord["rating"];
+  return {
+    id: String(row.id ?? crypto.randomUUID()),
+    memberId: String(row.member_number ?? row.member_id ?? ""),
+    memberName: String(row.member_name ?? ""),
+    category: feedbackCategories.has(category) ? category : "service",
+    rating,
+    comment: String(row.comment ?? ""),
+    contactOptIn: Boolean(row.contact_opt_in),
+    contactInfo: row.contact_info ? String(row.contact_info) : null,
+    createdAt: String(row.created_at ?? new Date().toISOString()),
+  };
+}
+
+export async function submitFeedback(entry: Omit<FeedbackRecord, "id" | "createdAt">) {
+  if (!feedbackCategories.has(entry.category)) {
+    throw new Error("Feedback category must be one of: points, rewards, service, app.");
+  }
+  if (entry.rating < 1 || entry.rating > 5) {
+    throw new Error("Rating must be between 1 and 5.");
+  }
+  const comment = entry.comment.trim();
+  if (!comment) {
+    throw new Error("Feedback comment is required.");
+  }
+  if (comment.length > 500) {
+    throw new Error("Feedback comment must be 500 characters or less.");
+  }
+
+  const { data, error } = await supabase
+    .from("member_feedback")
+    .insert({
+      member_number: entry.memberId,
+      member_name: entry.memberName.trim(),
+      category: entry.category,
+      rating: entry.rating,
+      comment,
+      contact_opt_in: Boolean(entry.contactOptIn),
+      contact_info: entry.contactInfo?.trim() ? entry.contactInfo.trim() : null,
+    })
+    .select("id,member_number,member_name,category,rating,comment,contact_opt_in,contact_info,created_at")
+    .single();
+  if (error) throw error;
+  return normalizeFeedbackRow((data ?? {}) as Record<string, unknown>);
+}
+
+export async function loadFeedback(): Promise<FeedbackRecord[]> {
+  const { data, error } = await supabase
+    .from("member_feedback")
+    .select("id,member_number,member_name,category,rating,comment,contact_opt_in,contact_info,created_at")
+    .order("created_at", { ascending: false })
+    .limit(300);
+  if (error) throw error;
+  return (data || []).map((row) => normalizeFeedbackRow(row as Record<string, unknown>));
 }
 
 export async function queueManagerFeedbackNotification(record: FeedbackRecord) {
-  const res = await supabase.from("notification_outbox").insert({
-    user_id: null,
-    channel: "email",
-    subject: `New feedback: ${record.category}`,
-    message: `${record.memberName} rated ${record.rating}/5. ${record.comment.slice(0, 180)}`,
-  });
+  const admins = await supabase
+    .from("app_user_roles")
+    .select("user_id")
+    .eq("role", "admin");
+  if (admins.error) throw admins.error;
+  const rows = (admins.data || [])
+    .map((item) => String(item.user_id || "").trim())
+    .filter(Boolean)
+    .map((userId) => ({
+      user_id: userId,
+      channel: "email" as const,
+      subject: `New feedback: ${record.category}`,
+      message: `${record.memberName} rated ${record.rating}/5. ${record.comment.slice(0, 180)}`,
+      is_promotional: false,
+    }));
+  if (rows.length === 0) return;
+
+  const res = await supabase.from("notification_outbox").insert(rows);
   if (res.error) throw res.error;
 }
