@@ -179,15 +179,7 @@ export function useAdminData() {
         const byId = segmentByMemberId.get(String(member.id ?? member.member_id ?? ""));
         const byNumber = segmentByMemberNumber.get(String(member.member_number ?? ""));
         const segment = byId || byNumber;
-        if (!segment) {
-          return {
-            ...member,
-            auto_segment: null,
-            manual_segment: member.manual_segment ?? null,
-            effective_segment: null,
-            last_activity_at: null,
-          };
-        }
+        if (!segment) return member;
         return {
           ...member,
           auto_segment: (segment.auto_segment as Member["auto_segment"]) ?? null,

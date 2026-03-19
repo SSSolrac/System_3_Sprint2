@@ -75,7 +75,7 @@ export default function AdminMembersPage() {
 
   const segmentedMembers = useMemo(() => {
     const byMember = members.map((member) => {
-      const effectiveSegment = member.effective_segment || "Inactive";
+      const effectiveSegment = member.effective_segment || member.auto_segment || "Inactive";
       return {
         ...member,
         segment: effectiveSegment,
@@ -84,7 +84,7 @@ export default function AdminMembersPage() {
     });
 
     return byMember;
-  }, [members]);
+  }, [members, manualSegmentDraft]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
