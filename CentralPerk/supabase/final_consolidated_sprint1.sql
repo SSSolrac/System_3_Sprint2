@@ -131,90 +131,6 @@ create table if not exists public.member_feedback (
   constraint member_feedback_comment_length_check check (char_length(comment) <= 500)
 );
 
-create table if not exists public.member_referrals (
-  id bigserial primary key,
-  referrer_member_id bigint not null references public.loyalty_members(id) on delete cascade,
-  referrer_code text not null,
-  referee_email text,
-  referee_email_normalized text,
-  referee_member_id bigint references public.loyalty_members(id) on delete set null,
-  status text not null default 'pending',
-  created_at timestamptz not null default now(),
-  converted_at timestamptz,
-  bonus_awarded boolean not null default false,
-  referrer_bonus_txn_id bigint references public.loyalty_transactions(id) on delete set null,
-  referee_bonus_txn_id bigint references public.loyalty_transactions(id) on delete set null,
-  constraint member_referrals_status_check check (status in ('pending', 'joined', 'converted', 'rewarded', 'cancelled'))
-);
-
-create table if not exists public.member_birthday_rewards (
-  id bigserial primary key,
-  member_id bigint not null references public.loyalty_members(id) on delete cascade,
-  reward_year integer not null,
-  tier_at_award text not null,
-  points_awarded integer not null,
-  voucher_code text not null,
-  voucher_expires_at timestamptz,
-  source text not null default 'system',
-  created_at timestamptz not null default now(),
-  constraint member_birthday_rewards_tier_check check (tier_at_award in ('Bronze', 'Silver', 'Gold')),
-  constraint member_birthday_rewards_unique_member_year unique (member_id, reward_year),
-  constraint member_birthday_rewards_points_check check (points_awarded in (100, 500, 1000))
-);
-
-alter table public.member_referrals
-  add column if not exists referrer_member_id bigint,
-  add column if not exists referrer_code text,
-  add column if not exists referee_email text,
-  add column if not exists referee_email_normalized text;
-
-alter table public.member_referrals
-  add column if not exists referee_member_id bigint,
-  add column if not exists status text not null default 'pending',
-  add column if not exists bonus_awarded boolean not null default false,
-  add column if not exists referrer_bonus_txn_id bigint,
-  add column if not exists referee_bonus_txn_id bigint,
-  add column if not exists created_at timestamptz not null default now(),
-  add column if not exists converted_at timestamptz;
-
-update public.member_referrals
-set referee_email_normalized = lower(trim(referee_email))
-where coalesce(trim(referee_email_normalized), '') = ''
-  and coalesce(trim(referee_email), '') <> '';
-
-alter table public.member_birthday_rewards
-  add column if not exists member_id bigint,
-  add column if not exists reward_year integer,
-  add column if not exists tier_at_award text,
-  add column if not exists points_awarded integer,
-  add column if not exists voucher_code text,
-  add column if not exists voucher_expires_at timestamptz,
-  add column if not exists source text not null default 'system',
-  add column if not exists created_at timestamptz not null default now();
-
-do $$
-begin
-  if not exists (
-    select 1 from pg_constraint
-    where conname = 'member_birthday_rewards_tier_check'
-      and conrelid = 'public.member_birthday_rewards'::regclass
-  ) then
-    alter table public.member_birthday_rewards
-      add constraint member_birthday_rewards_tier_check
-      check (tier_at_award in ('Bronze', 'Silver', 'Gold'));
-  end if;
-
-  if not exists (
-    select 1 from pg_constraint
-    where conname = 'member_birthday_rewards_unique_member_year'
-      and conrelid = 'public.member_birthday_rewards'::regclass
-  ) then
-    alter table public.member_birthday_rewards
-      add constraint member_birthday_rewards_unique_member_year
-      unique (member_id, reward_year);
-  end if;
-end $$;
-
 create table if not exists public.loyalty_member_profile_audit (
   id bigserial primary key,
   member_id bigint references public.loyalty_members(id),
@@ -360,28 +276,6 @@ on public.notification_outbox (user_id, channel, created_at desc)
 where is_promotional = true;
 create index if not exists idx_member_feedback_created
 on public.member_feedback (created_at desc);
-create unique index if not exists idx_member_referrals_unique_referrer_email
-on public.member_referrals (referrer_member_id, referee_email_normalized);
-create unique index if not exists idx_member_referrals_unique_referee_email_joined
-on public.member_referrals (referee_email_normalized)
-where status = 'joined';
-create unique index if not exists idx_member_referrals_unique_referee_member
-on public.member_referrals (referee_member_id)
-where referee_member_id is not null;
-create unique index if not exists idx_member_referrals_unique_referrer_bonus_txn
-on public.member_referrals (referrer_bonus_txn_id)
-where referrer_bonus_txn_id is not null;
-create unique index if not exists idx_member_referrals_unique_referee_bonus_txn
-on public.member_referrals (referee_bonus_txn_id)
-where referee_bonus_txn_id is not null;
-create index if not exists idx_member_referrals_referrer_created
-on public.member_referrals (referrer_member_id, created_at desc);
-create index if not exists idx_member_referrals_status_created
-on public.member_referrals (status, created_at desc);
-create unique index if not exists idx_member_birthday_rewards_member_year
-on public.member_birthday_rewards (member_id, reward_year);
-create unique index if not exists idx_member_birthday_rewards_voucher_code
-on public.member_birthday_rewards (voucher_code);
 create index if not exists idx_member_login_activity_member_date
 on public.member_login_activity (member_id, login_at desc);
 create index if not exists idx_member_reengagement_actions_member_date
@@ -556,8 +450,6 @@ alter table public.loyalty_members enable row level security;
 alter table public.member_login_activity enable row level security;
 alter table public.member_reengagement_actions enable row level security;
 alter table public.member_feedback enable row level security;
-alter table public.member_referrals enable row level security;
-alter table public.member_birthday_rewards enable row level security;
 
 drop policy if exists loyalty_members_select_own on public.loyalty_members;
 create policy loyalty_members_select_own
@@ -672,82 +564,6 @@ with check (
       and lower(m.email) = lower(public.app_current_email())
   )
 );
-
-drop policy if exists member_referrals_select on public.member_referrals;
-create policy member_referrals_select
-on public.member_referrals
-for select
-to authenticated
-using (
-  public.app_is_admin()
-  or exists (
-    select 1
-    from public.loyalty_members m
-    where (m.id = member_referrals.referrer_member_id or m.id = member_referrals.referee_member_id)
-      and lower(m.email) = lower(public.app_current_email())
-  )
-);
-
-drop policy if exists member_referrals_insert on public.member_referrals;
-create policy member_referrals_insert
-on public.member_referrals
-for insert
-to authenticated
-with check (
-  public.app_is_admin()
-  or exists (
-    select 1
-    from public.loyalty_members m
-    where m.id = member_referrals.referrer_member_id
-      and lower(m.email) = lower(public.app_current_email())
-  )
-);
-
-drop policy if exists member_referrals_update on public.member_referrals;
-create policy member_referrals_update
-on public.member_referrals
-for update
-to authenticated
-using (
-  public.app_is_admin()
-  or exists (
-    select 1
-    from public.loyalty_members m
-    where (m.id = member_referrals.referrer_member_id or m.id = member_referrals.referee_member_id)
-      and lower(m.email) = lower(public.app_current_email())
-  )
-)
-with check (
-  public.app_is_admin()
-  or exists (
-    select 1
-    from public.loyalty_members m
-    where (m.id = member_referrals.referrer_member_id or m.id = member_referrals.referee_member_id)
-      and lower(m.email) = lower(public.app_current_email())
-  )
-);
-
-drop policy if exists member_birthday_rewards_select on public.member_birthday_rewards;
-create policy member_birthday_rewards_select
-on public.member_birthday_rewards
-for select
-to authenticated
-using (
-  public.app_is_admin()
-  or exists (
-    select 1
-    from public.loyalty_members m
-    where m.id = member_birthday_rewards.member_id
-      and lower(m.email) = lower(public.app_current_email())
-  )
-);
-
-drop policy if exists member_birthday_rewards_insert_admin on public.member_birthday_rewards;
-create policy member_birthday_rewards_insert_admin
-on public.member_birthday_rewards
-for insert
-to authenticated
-with check (public.app_is_admin());
 
 drop policy if exists profile_photos_read on storage.objects;
 create policy profile_photos_read
@@ -927,7 +743,6 @@ declare
   v_referrer public.loyalty_members%rowtype;
   v_referee public.loyalty_members%rowtype;
   v_referral public.member_referrals%rowtype;
-  v_existing_bonus public.member_referrals%rowtype;
   v_referrer_tx_id bigint;
   v_referee_tx_id bigint;
 begin
@@ -954,21 +769,6 @@ begin
 
   if v_referrer.id = v_referee.id then
     return query select false, null::bigint, v_referrer.member_number::text, 0, 0;
-    return;
-  end if;
-
-  select *
-  into v_existing_bonus
-  from public.member_referrals mr
-  where (
-      mr.referee_member_id = v_referee.id
-      or mr.referee_email_normalized = lower(trim(v_referee.email))
-    )
-    and coalesce(mr.bonus_awarded, false) = true
-  limit 1;
-
-  if v_existing_bonus is not null then
-    return query select false, v_existing_bonus.id, v_referrer.member_number::text, 0, 0;
     return;
   end if;
 
@@ -1057,7 +857,6 @@ declare
   v_count integer := 0;
   v_points integer;
   v_voucher_code text;
-  v_reward_id bigint;
   r record;
 begin
   if extract(day from p_run_date)::integer <> 1 then
@@ -1083,7 +882,6 @@ begin
     end;
 
     v_voucher_code := format('BDAY-%s-%s', v_year, lpad(r.id::text, 6, '0'));
-    v_reward_id := null;
 
     insert into public.member_birthday_rewards (
       member_id, reward_year, tier_at_award, points_awarded, voucher_code, voucher_expires_at, source
@@ -1091,12 +889,7 @@ begin
     values (
       r.id, v_year, coalesce(r.tier, 'Bronze'), v_points, v_voucher_code, (p_run_date + interval '30 days')::date, 'auto'
     )
-    on conflict (member_id, reward_year) do nothing
-    returning id into v_reward_id;
-
-    if v_reward_id is null then
-      continue;
-    end if;
+    on conflict (member_id, reward_year) do nothing;
 
     insert into public.loyalty_transactions (member_id, transaction_type, points, reason, receipt_id)
     values (
@@ -1150,7 +943,6 @@ declare
   v_year integer := extract(year from current_date)::integer;
   v_points integer;
   v_voucher_code text;
-  v_reward_id bigint;
 begin
   select * into v_member
   from public.loyalty_members
@@ -1186,7 +978,6 @@ begin
     else 100
   end;
   v_voucher_code := format('BDAY-%s-%s', v_year, lpad(v_member.id::text, 6, '0'));
-  v_reward_id := null;
 
   insert into public.member_birthday_rewards (
     member_id, reward_year, tier_at_award, points_awarded, voucher_code, voucher_expires_at, source
@@ -1194,17 +985,7 @@ begin
   values (
     v_member.id, v_year, coalesce(v_member.tier, 'Bronze'), v_points, v_voucher_code, (current_date + interval '30 days')::date, 'manual'
   )
-  on conflict (member_id, reward_year) do nothing
-  returning id into v_reward_id;
-
-  if v_reward_id is null then
-    return query
-    select true, b.points_awarded, b.voucher_code
-    from public.member_birthday_rewards b
-    where b.member_id = v_member.id and b.reward_year = v_year
-    limit 1;
-    return;
-  end if;
+  on conflict (member_id, reward_year) do nothing;
 
   insert into public.loyalty_transactions (member_id, transaction_type, points, reason, receipt_id)
   values (

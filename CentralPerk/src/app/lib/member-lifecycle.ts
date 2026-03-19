@@ -1,6 +1,11 @@
 import { supabase } from "../../utils/supabase/client";
 import type { MemberData } from "../types/loyalty";
 
+const STORAGE_KEYS = {
+  referrals: "centralperk-referrals-v1",
+  birthdayClaims: "centralperk-birthday-claims-v1",
+} as const;
+
 export type MemberSegment = "High Value" | "Active" | "At Risk" | "Inactive";
 
 export interface SegmentStats {
@@ -408,6 +413,24 @@ export async function loadBirthdayRewardStatus(memberId: string, fallbackEmail?:
     pointsAwarded: Number(data.points_awarded ?? 0),
     voucherExpiresAt: String(data.voucher_expires_at ?? ""),
     badgeLabel: "Birthday Celebrant",
+  };
+}
+
+const feedbackCategories = new Set<FeedbackRecord["category"]>(["points", "rewards", "service", "app"]);
+
+function normalizeFeedbackRow(row: Record<string, unknown>): FeedbackRecord {
+  const category = String(row.category || "service").toLowerCase() as FeedbackRecord["category"];
+  const rating = Math.max(1, Math.min(5, Number(row.rating) || 5)) as FeedbackRecord["rating"];
+  return {
+    id: String(row.id ?? crypto.randomUUID()),
+    memberId: String(row.member_number ?? row.member_id ?? ""),
+    memberName: String(row.member_name ?? ""),
+    category: feedbackCategories.has(category) ? category : "service",
+    rating,
+    comment: String(row.comment ?? ""),
+    contactOptIn: Boolean(row.contact_opt_in),
+    contactInfo: row.contact_info ? String(row.contact_info) : null,
+    createdAt: String(row.created_at ?? new Date().toISOString()),
   };
 }
 
