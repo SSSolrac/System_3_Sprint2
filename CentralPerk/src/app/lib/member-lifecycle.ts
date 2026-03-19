@@ -86,7 +86,7 @@ export function exportMembersCsv(rows: Array<{ memberNumber: string; name: strin
       row.email,
       row.phone,
       row.segment,
-    ].map((v) => `"${String(v ?? "").replaceAll('"', '""')}"`).join(","));
+    ].map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","));
   }
 
   const win = safeWindow();
