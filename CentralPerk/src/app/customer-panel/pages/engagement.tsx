@@ -12,15 +12,17 @@ import { Textarea } from "../../components/ui/textarea";
 import type { AppOutletContext } from "../../types/app-context";
 import { awardMemberPoints } from "../../lib/loyalty-supabase";
 import {
-  buildReferralCode,
+  claimBirthdayReward,
   createReferral,
+  getMemberReferralCode,
   getBirthdayRewardPoints,
   hasBirthdayClaimedThisYear,
   isBirthdayMonth,
+  loadBirthdayRewardStatus,
   loadReferrals,
-  markBirthdayClaimed,
   queueManagerFeedbackNotification,
   submitFeedback,
+  type ReferralRecord,
 } from "../../lib/member-lifecycle";
 import {
   buildShareAssetDataUrl,
@@ -42,6 +44,14 @@ export default function CustomerEngagementPage() {
   const [submittingSurveyId, setSubmittingSurveyId] = useState<string | null>(null);
   const [claimingChallengeId, setClaimingChallengeId] = useState<string | null>(null);
   const [referralEmail, setReferralEmail] = useState("");
+  const [referralCode, setReferralCode] = useState("");
+  const [myReferrals, setMyReferrals] = useState<ReferralRecord[]>([]);
+  const [birthdayStatus, setBirthdayStatus] = useState<{ hasReward: boolean; voucherCode: string | null; pointsAwarded: number; badgeLabel: string | null; voucherExpiresAt?: string }>({
+    hasReward: false,
+    voucherCode: null,
+    pointsAwarded: 0,
+    badgeLabel: null,
+  });
   const [feedbackCategory, setFeedbackCategory] = useState<"points" | "rewards" | "service" | "app">("service");
   const [feedbackRating, setFeedbackRating] = useState<1 | 2 | 3 | 4 | 5>(5);
   const [feedbackComment, setFeedbackComment] = useState("");
@@ -56,7 +66,17 @@ export default function CustomerEngagementPage() {
     () => getMemberPrivacySettings(state, user.memberId),
     [state, user.memberId]
   );
-  const referralCode = buildReferralCode(user);
+  useEffect(() => {
+    getMemberReferralCode(user.memberId, user.email)
+      .then(setReferralCode)
+      .catch(() => setReferralCode(""));
+    loadReferrals(user.memberId)
+      .then(setMyReferrals)
+      .catch(() => setMyReferrals([]));
+    loadBirthdayRewardStatus(user.memberId, user.email)
+      .then(setBirthdayStatus)
+      .catch(() => setBirthdayStatus({ hasReward: false, voucherCode: null, pointsAwarded: 0, badgeLabel: null }));
+  }, [user.memberId, user.email]);
   const sharePreview = useMemo(
     () =>
       buildShareAssetDataUrl({
@@ -156,8 +176,6 @@ export default function CustomerEngagementPage() {
 
 
 
-  const myReferrals = useMemo(() => loadReferrals().filter((item) => item.referrerMemberId === user.memberId), [state.shareEvents.length, user.memberId]);
-
   const handleCreateReferral = () => {
     const email = referralEmail.trim().toLowerCase();
     if (!email || !email.includes("@")) {
@@ -167,11 +185,15 @@ export default function CustomerEngagementPage() {
 
     createReferral({
       referrerMemberId: user.memberId,
-      referrerCode: referralCode,
       refereeEmail: email,
-    });
-    setReferralEmail("");
-    toast.success("Referral created. Share your code via SMS, email, or QR flow.");
+    })
+      .then(() => loadReferrals(user.memberId))
+      .then((rows) => {
+        setMyReferrals(rows);
+        setReferralEmail("");
+        toast.success("Referral created. Share your code via SMS, email, or QR flow.");
+      })
+      .catch((error) => toast.error(error instanceof Error ? error.message : "Failed to create referral."));
   };
 
   const handleBirthdayClaim = async () => {
@@ -179,27 +201,27 @@ export default function CustomerEngagementPage() {
       toast.error("Birthday rewards unlock on your birthday month.");
       return;
     }
-    if (hasBirthdayClaimedThisYear(user.memberId)) {
+    const alreadyClaimed = await hasBirthdayClaimedThisYear(user.memberId, user.email);
+    if (alreadyClaimed) {
       toast.error("Birthday reward already claimed this year.");
       return;
     }
-
-    const rewardPoints = getBirthdayRewardPoints(user.tier);
     try {
-      await awardMemberPoints({
-        memberIdentifier: user.memberId,
-        fallbackEmail: user.email,
-        points: rewardPoints,
-        transactionType: "MANUAL_AWARD",
-        reason: `Birthday reward (${new Date().getFullYear()})`,
-      });
-      markBirthdayClaimed(user.memberId);
+      const result = await claimBirthdayReward(user.memberId, user.email);
       await refreshUser();
-      toast.success(`Birthday reward credited: +${rewardPoints} points.`);
+      const status = await loadBirthdayRewardStatus(user.memberId, user.email);
+      setBirthdayStatus(status);
+      toast.success(
+        result.granted
+          ? `Birthday reward credited: +${result.pointsAwarded || getBirthdayRewardPoints(user.tier)} points.`
+          : "Birthday reward is already granted for this year."
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to claim birthday reward.");
     }
   };
+
+  const referralLink = referralCode ? `${window.location.origin}/register?ref=${encodeURIComponent(referralCode)}` : "";
 
   const handleFeedbackSubmit = async () => {
     const comment = feedbackComment.trim();
@@ -341,6 +363,32 @@ export default function CustomerEngagementPage() {
           <h2 className="text-xl font-semibold text-gray-900">Referral Program</h2>
           <p className="text-sm text-gray-500 mt-1">Share your code and earn 500 points when friends join. Friends earn 200 points.</p>
           <p className="mt-3 text-sm">Your referral code: <span className="font-bold text-[#10213a]">{referralCode}</span></p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => window.open(`sms:?body=${encodeURIComponent(`Join Central Perk Rewards with my code ${referralCode}: ${referralLink}`)}`, "_self")}
+            >
+              Share via SMS
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => window.open(`mailto:?subject=${encodeURIComponent("Join Central Perk Rewards")}&body=${encodeURIComponent(`Use my referral code ${referralCode} and sign up here: ${referralLink}`)}`, "_self")}
+            >
+              Share via Email
+            </Button>
+            <Button type="button" variant="outline" onClick={() => navigator.clipboard.writeText(referralLink)}>
+              Copy QR Link
+            </Button>
+          </div>
+          {referralLink ? (
+            <img
+              src={`https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(referralLink)}`}
+              alt="Referral QR code"
+              className="mt-3 h-24 w-24 rounded border border-gray-200"
+            />
+          ) : null}
           <div className="mt-3 space-y-2">
             <Label htmlFor="referral-email">Friend email</Label>
             <Input id="referral-email" value={referralEmail} onChange={(e) => setReferralEmail(e.target.value)} placeholder="friend@email.com" />
@@ -353,9 +401,13 @@ export default function CustomerEngagementPage() {
           <h2 className="text-xl font-semibold text-gray-900">Birthday Rewards</h2>
           <p className="text-sm text-gray-500 mt-1">Auto-credited on the 1st of your birthday month. Claim once per year.</p>
           <p className="mt-3 text-sm">Current tier bonus: <span className="font-semibold">{getBirthdayRewardPoints(user.tier)} points</span></p>
-          <p className="mt-1 text-xs text-gray-500">Voucher + birthday badge are included in your month benefits.</p>
-          <Button onClick={handleBirthdayClaim} className="mt-3 bg-[#00A3AD] text-white hover:bg-[#08939c]" disabled={!isBirthdayMonth(user) || hasBirthdayClaimedThisYear(user.memberId)}>
-            {hasBirthdayClaimedThisYear(user.memberId) ? "Claimed this year" : "Claim Birthday Reward"}
+          <p className="mt-1 text-xs text-gray-500">
+            Voucher + birthday badge are included in your month benefits.
+            {birthdayStatus.voucherCode ? ` Voucher: ${birthdayStatus.voucherCode}` : ""}
+          </p>
+          {birthdayStatus.badgeLabel ? <Badge className="mt-2">{birthdayStatus.badgeLabel}</Badge> : null}
+          <Button onClick={handleBirthdayClaim} className="mt-3 bg-[#00A3AD] text-white hover:bg-[#08939c]" disabled={!isBirthdayMonth(user) || birthdayStatus.hasReward}>
+            {birthdayStatus.hasReward ? "Claimed this year" : "Claim Birthday Reward"}
           </Button>
         </Card>
 

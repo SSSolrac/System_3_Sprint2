@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { supabase } from '../../utils/supabase/client';
 import { ensureWelcomePackage } from '../lib/loyalty-supabase';
+import { applyReferralCodeForSignup } from '../lib/member-lifecycle';
 
 const WELCOME_NOTICE_STORAGE_KEY = 'centralperk-welcome-notice';
 
@@ -24,6 +25,7 @@ export function RegistrationCard() {
     phone: '',
     birthdate: '',
     password: '',
+    referralCode: typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("ref") || "" : "",
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -170,6 +172,20 @@ export function RegistrationCard() {
       const welcomeResult = await ensureWelcomePackage(newMember.member_number, newMember.email);
       const memberPointsBalance = Number(welcomeResult.newBalance ?? newMember.points_balance ?? 0);
 
+      if (formData.referralCode.trim()) {
+        const referral = await applyReferralCodeForSignup({
+          referralCode: formData.referralCode.trim(),
+          refereeMemberId: String(newMember.member_number),
+          refereeEmail: String(newMember.email),
+        });
+        if (!referral.applied) {
+          setMessage({
+            type: 'error',
+            text: 'Registration succeeded, but referral code was invalid or not applicable.',
+          });
+        }
+      }
+
       // Update state with new member data
       setMessage({
         type: 'success',
@@ -208,6 +224,7 @@ export function RegistrationCard() {
         phone: '',
         birthdate: '',
         password: '',
+        referralCode: '',
       });
 
       console.log('Member registered:', newMember);
@@ -386,6 +403,21 @@ export function RegistrationCard() {
                 placeholder="Minimum 6 characters"
                 required
                 minLength={6}
+              />
+            </div>
+
+            <div>
+              <label htmlFor="referralCode" className="block mb-2 text-gray-700 font-medium">
+                Referral Code (Optional)
+              </label>
+              <input
+                type="text"
+                id="referralCode"
+                name="referralCode"
+                value={formData.referralCode}
+                onChange={handleChange}
+                className="w-full px-4 py-3 bg-[#dbe4f2] rounded-xl border border-transparent focus:outline-none focus:ring-2 focus:ring-[#1bb9d3] focus:border-transparent transition-all"
+                placeholder="REF000123"
               />
             </div>
 

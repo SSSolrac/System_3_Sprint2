@@ -29,6 +29,7 @@ create table if not exists public.loyalty_members (
 
 alter table public.loyalty_members
   add column if not exists manual_segment text,
+  add column if not exists referral_code text,
   add column if not exists sms_enabled boolean not null default true,
   add column if not exists email_enabled boolean not null default true,
   add column if not exists push_enabled boolean not null default true,
@@ -248,6 +249,9 @@ create index if not exists idx_members_member_number on public.loyalty_members(m
 create unique index if not exists idx_loyalty_members_phone_unique
 on public.loyalty_members (phone)
 where phone is not null and length(trim(phone)) > 0;
+create unique index if not exists idx_loyalty_members_referral_code_unique
+on public.loyalty_members (lower(referral_code))
+where referral_code is not null and length(trim(referral_code)) > 0;
 
 create index if not exists idx_transactions_member on public.loyalty_transactions(member_id);
 create index if not exists idx_transactions_date on public.loyalty_transactions(transaction_date desc);
@@ -646,6 +650,357 @@ as $$
   left join latest_activity la on la.member_id = m.id;
 $$;
 
+create or replace function public.loyalty_assign_referral_code()
+returns trigger
+language plpgsql
+as $$
+begin
+  update public.loyalty_members
+  set referral_code = 'REF' || regexp_replace(coalesce(member_number, ''), '\D', '', 'g')
+  where id = new.id
+    and coalesce(trim(referral_code), '') = ''
+    and coalesce(trim(member_number), '') <> '';
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_loyalty_assign_referral_code on public.loyalty_members;
+create trigger trg_loyalty_assign_referral_code
+after insert on public.loyalty_members
+for each row
+execute function public.loyalty_assign_referral_code();
+
+update public.loyalty_members
+set referral_code = 'REF' || regexp_replace(coalesce(member_number, ''), '\D', '', 'g')
+where coalesce(trim(referral_code), '') = ''
+  and coalesce(trim(member_number), '') <> '';
+
+create or replace function public.loyalty_create_referral_invite(
+  p_referrer_member_number text,
+  p_referee_email text
+)
+returns public.member_referrals
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_referrer public.loyalty_members%rowtype;
+  v_referral public.member_referrals%rowtype;
+begin
+  select *
+  into v_referrer
+  from public.loyalty_members
+  where member_number = p_referrer_member_number
+  limit 1;
+
+  if v_referrer is null then
+    raise exception 'Referrer member not found';
+  end if;
+
+  if lower(coalesce(v_referrer.email, '')) = lower(trim(coalesce(p_referee_email, ''))) then
+    raise exception 'Self-referral is not allowed';
+  end if;
+
+  insert into public.member_referrals (
+    referrer_member_id,
+    referrer_code,
+    referee_email,
+    status
+  )
+  values (
+    v_referrer.id,
+    v_referrer.referral_code,
+    lower(trim(p_referee_email)),
+    'pending'
+  )
+  on conflict (referrer_member_id, referee_email_normalized)
+  do update set
+    referrer_code = excluded.referrer_code
+  returning * into v_referral;
+
+  return v_referral;
+end;
+$$;
+
+create or replace function public.loyalty_apply_referral(
+  p_referral_code text,
+  p_referee_member_number text,
+  p_referee_email text
+)
+returns table (
+  applied boolean,
+  referral_id bigint,
+  referrer_member_number text,
+  referrer_points integer,
+  referee_points integer
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_referrer public.loyalty_members%rowtype;
+  v_referee public.loyalty_members%rowtype;
+  v_referral public.member_referrals%rowtype;
+  v_referrer_tx_id bigint;
+  v_referee_tx_id bigint;
+begin
+  select * into v_referrer
+  from public.loyalty_members
+  where lower(referral_code) = lower(trim(coalesce(p_referral_code, '')))
+  limit 1;
+
+  if v_referrer is null then
+    return query select false, null::bigint, null::text, 0, 0;
+    return;
+  end if;
+
+  select * into v_referee
+  from public.loyalty_members
+  where member_number = p_referee_member_number
+     or lower(email) = lower(trim(coalesce(p_referee_email, '')))
+  limit 1;
+
+  if v_referee is null then
+    return query select false, null::bigint, null::text, null::integer, null::integer;
+    return;
+  end if;
+
+  if v_referrer.id = v_referee.id then
+    return query select false, null::bigint, v_referrer.member_number::text, 0, 0;
+    return;
+  end if;
+
+  insert into public.member_referrals (
+    referrer_member_id,
+    referrer_code,
+    referee_email,
+    referee_member_id,
+    status,
+    converted_at
+  )
+  values (
+    v_referrer.id,
+    v_referrer.referral_code,
+    lower(trim(v_referee.email)),
+    v_referee.id,
+    'joined',
+    now()
+  )
+  on conflict (referrer_member_id, referee_email_normalized)
+  do update set
+    referee_member_id = excluded.referee_member_id,
+    status = 'joined',
+    converted_at = coalesce(public.member_referrals.converted_at, now())
+  returning * into v_referral;
+
+  if coalesce(v_referral.bonus_awarded, false) = true then
+    return query select true, v_referral.id, v_referrer.member_number::text, 0, 0;
+    return;
+  end if;
+
+  insert into public.loyalty_transactions (member_id, transaction_type, points, reason, receipt_id)
+  values (
+    v_referrer.id,
+    'MANUAL_AWARD',
+    500,
+    format('Referral bonus (referral #%s)', v_referral.id),
+    format('REFERRAL-REFERRER-%s', v_referral.id)
+  )
+  on conflict (receipt_id) do nothing
+  returning id into v_referrer_tx_id;
+
+  insert into public.loyalty_transactions (member_id, transaction_type, points, reason, receipt_id)
+  values (
+    v_referee.id,
+    'MANUAL_AWARD',
+    200,
+    format('Referral welcome bonus (referral #%s)', v_referral.id),
+    format('REFERRAL-REFEREE-%s', v_referral.id)
+  )
+  on conflict (receipt_id) do nothing
+  returning id into v_referee_tx_id;
+
+  if v_referrer_tx_id is null then
+    select id into v_referrer_tx_id
+    from public.loyalty_transactions
+    where receipt_id = format('REFERRAL-REFERRER-%s', v_referral.id)
+    limit 1;
+  end if;
+
+  if v_referee_tx_id is null then
+    select id into v_referee_tx_id
+    from public.loyalty_transactions
+    where receipt_id = format('REFERRAL-REFEREE-%s', v_referral.id)
+    limit 1;
+  end if;
+
+  update public.member_referrals
+  set bonus_awarded = (v_referrer_tx_id is not null and v_referee_tx_id is not null),
+      referrer_bonus_txn_id = v_referrer_tx_id,
+      referee_bonus_txn_id = v_referee_tx_id
+  where id = v_referral.id;
+
+  return query select true, v_referral.id, v_referrer.member_number::text, 500, 200;
+end;
+$$;
+
+create or replace function public.loyalty_process_birthday_rewards(p_run_date date default current_date)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_year integer := extract(year from p_run_date)::integer;
+  v_count integer := 0;
+  v_points integer;
+  v_voucher_code text;
+  r record;
+begin
+  if extract(day from p_run_date)::integer <> 1 then
+    return 0;
+  end if;
+
+  for r in
+    select m.*
+    from public.loyalty_members m
+    where m.birthdate is not null
+      and extract(month from m.birthdate)::integer = extract(month from p_run_date)::integer
+      and not exists (
+        select 1
+        from public.member_birthday_rewards b
+        where b.member_id = m.id
+          and b.reward_year = v_year
+      )
+  loop
+    v_points := case lower(coalesce(r.tier, 'bronze'))
+      when 'gold' then 1000
+      when 'silver' then 500
+      else 100
+    end;
+
+    v_voucher_code := format('BDAY-%s-%s', v_year, lpad(r.id::text, 6, '0'));
+
+    insert into public.member_birthday_rewards (
+      member_id, reward_year, tier_at_award, points_awarded, voucher_code, voucher_expires_at, source
+    )
+    values (
+      r.id, v_year, coalesce(r.tier, 'Bronze'), v_points, v_voucher_code, (p_run_date + interval '30 days')::date, 'auto'
+    )
+    on conflict (member_id, reward_year) do nothing;
+
+    insert into public.loyalty_transactions (member_id, transaction_type, points, reason, receipt_id)
+    values (
+      r.id,
+      'MANUAL_AWARD',
+      v_points,
+      format('Birthday reward (%s)', v_year),
+      format('BIRTHDAY-%s-%s', v_year, r.id)
+    )
+    on conflict (receipt_id) do nothing;
+
+    insert into public.notification_outbox (user_id, channel, subject, message, is_promotional)
+    select
+      u.id,
+      'email',
+      'Happy Birthday from Central Perk!',
+      format(
+        'Hi %s! Happy birthday month. We credited %s bonus points and unlocked voucher %s (valid until %s).',
+        coalesce(r.first_name, 'Member'),
+        v_points,
+        v_voucher_code,
+        (p_run_date + interval '30 days')::date
+      ),
+      false
+    from auth.users u
+    where lower(u.email) = lower(r.email)
+    on conflict do nothing;
+
+    v_count := v_count + 1;
+  end loop;
+
+  return v_count;
+end;
+$$;
+
+create or replace function public.loyalty_claim_birthday_reward(
+  p_member_number text,
+  p_fallback_email text default null
+)
+returns table (
+  granted boolean,
+  points_awarded integer,
+  voucher_code text
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_member public.loyalty_members%rowtype;
+  v_year integer := extract(year from current_date)::integer;
+  v_points integer;
+  v_voucher_code text;
+begin
+  select * into v_member
+  from public.loyalty_members
+  where member_number = p_member_number
+     or (p_fallback_email is not null and lower(email) = lower(p_fallback_email))
+  limit 1;
+
+  if v_member is null or v_member.birthdate is null then
+    return query select false, 0, null::text;
+    return;
+  end if;
+
+  if extract(month from v_member.birthdate)::integer <> extract(month from current_date)::integer then
+    return query select false, 0, null::text;
+    return;
+  end if;
+
+  if exists (
+    select 1 from public.member_birthday_rewards
+    where member_id = v_member.id and reward_year = v_year
+  ) then
+    return query
+    select true, b.points_awarded, b.voucher_code
+    from public.member_birthday_rewards b
+    where b.member_id = v_member.id and b.reward_year = v_year
+    limit 1;
+    return;
+  end if;
+
+  v_points := case lower(coalesce(v_member.tier, 'bronze'))
+    when 'gold' then 1000
+    when 'silver' then 500
+    else 100
+  end;
+  v_voucher_code := format('BDAY-%s-%s', v_year, lpad(v_member.id::text, 6, '0'));
+
+  insert into public.member_birthday_rewards (
+    member_id, reward_year, tier_at_award, points_awarded, voucher_code, voucher_expires_at, source
+  )
+  values (
+    v_member.id, v_year, coalesce(v_member.tier, 'Bronze'), v_points, v_voucher_code, (current_date + interval '30 days')::date, 'manual'
+  )
+  on conflict (member_id, reward_year) do nothing;
+
+  insert into public.loyalty_transactions (member_id, transaction_type, points, reason, receipt_id)
+  values (
+    v_member.id,
+    'MANUAL_AWARD',
+    v_points,
+    format('Birthday reward (%s)', v_year),
+    format('BIRTHDAY-%s-%s', v_year, v_member.id)
+  )
+  on conflict (receipt_id) do nothing;
+
+  return query select true, v_points, v_voucher_code;
+end;
+$$;
+
 -- ============================================================
 -- NOTIFICATION TRIGGERS
 -- ============================================================
@@ -1030,6 +1385,7 @@ create extension if not exists pg_cron;
 do $cron$
 declare
   existing_job_id integer;
+  birthday_job_id integer;
 begin
   begin
     select jobid
@@ -1046,6 +1402,27 @@ begin
       'loyalty_expiry_warning_30d_daily',
       '0 8 * * *',
       $job$select public.loyalty_queue_expiry_warning_notifications();$job$
+    );
+  exception
+    when undefined_table then
+      null;
+  end;
+
+  begin
+    select jobid
+    into birthday_job_id
+    from cron.job
+    where jobname = 'loyalty_birthday_rewards_daily'
+    limit 1;
+
+    if birthday_job_id is not null then
+      perform cron.unschedule(birthday_job_id);
+    end if;
+
+    perform cron.schedule(
+      'loyalty_birthday_rewards_daily',
+      '5 8 * * *',
+      $job$select public.loyalty_process_birthday_rewards(current_date);$job$
     );
   exception
     when undefined_table then

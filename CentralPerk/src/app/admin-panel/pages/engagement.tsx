@@ -303,6 +303,34 @@ export default function AdminEngagementPage() {
         </div>
       </section>
 
+      <section className="rounded-2xl border border-[#dbe7f3] bg-white p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-[#10213a]">Referral Tracking</h3>
+            <p className="text-sm text-gray-500">Invites, joins, and conversion bonuses.</p>
+          </div>
+          <Badge>{referralItems.length} invites</Badge>
+        </div>
+        <p className="mt-2 text-sm text-gray-600">
+          Conversions: {referralItems.filter((item) => item.status === "joined").length} • Bonuses awarded:{" "}
+          {referralItems.filter((item) => item.bonusAwarded).length}
+        </p>
+        <div className="mt-3 space-y-2">
+          {referralItems.slice(0, 10).map((row) => (
+            <div key={row.id} className="rounded-lg border border-gray-200 p-3">
+              <p className="text-sm font-semibold text-[#10213a]">
+                Referrer {row.referrerMemberId} → {row.refereeEmail}
+              </p>
+              <p className="text-xs text-gray-500">
+                {row.status === "joined" ? "Joined" : "Pending"} • Code {row.referrerCode}
+                {row.bonusAwarded ? " • Bonus awarded" : ""}
+              </p>
+            </div>
+          ))}
+          {referralItems.length === 0 ? <p className="text-sm text-gray-500">No referral records yet.</p> : null}
+        </div>
+      </section>
+
 
 
       <section className="rounded-2xl border border-[#dbe7f3] bg-white p-5">

@@ -11,6 +11,7 @@ import { Progress } from "../../components/ui/progress";
 import { toast } from "sonner";
 import { Switch } from "../../components/ui/switch";
 import {
+  loadBirthdayRewardStatus,
   loadCommunicationPreference,
   saveCommunicationPreference,
   type CommunicationPreference,
@@ -50,6 +51,7 @@ export default function Profile() {
     promotionalOptIn: true,
     frequency: "weekly",
   });
+  const [birthdayBadge, setBirthdayBadge] = useState<string | null>(null);
 
   const [tierMinimums, setTierMinimums] = useState({
     Bronze: 0,
@@ -84,6 +86,10 @@ export default function Profile() {
         )
       )
       .catch(() => setTierTimeline([]));
+
+    loadBirthdayRewardStatus(user.memberId, user.email)
+      .then((status) => setBirthdayBadge(status.badgeLabel))
+      .catch(() => setBirthdayBadge(null));
   }, [user]);
 
   useEffect(() => {
@@ -254,6 +260,7 @@ export default function Profile() {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Profile</h1>
         <p className="text-gray-500 mt-1">Manage your account and view your membership details</p>
+        {birthdayBadge ? <Badge className="mt-2">{birthdayBadge}</Badge> : null}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
