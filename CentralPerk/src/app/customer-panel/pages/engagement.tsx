@@ -46,6 +46,7 @@ export default function CustomerEngagementPage() {
   const [feedbackRating, setFeedbackRating] = useState<1 | 2 | 3 | 4 | 5>(5);
   const [feedbackComment, setFeedbackComment] = useState("");
   const [feedbackContactOptIn, setFeedbackContactOptIn] = useState(false);
+  const [feedbackContactInfo, setFeedbackContactInfo] = useState("");
 
   useEffect(() => {
     saveEngagementState(state);
@@ -211,21 +212,29 @@ export default function CustomerEngagementPage() {
       return;
     }
 
-    const saved = submitFeedback({
-      memberId: user.memberId,
-      memberName: user.fullName,
-      category: feedbackCategory,
-      rating: feedbackRating,
-      comment,
-      contactOptIn: feedbackContactOptIn,
-    });
-
     try {
-      await queueManagerFeedbackNotification(saved);
-    } catch {}
+      const saved = await submitFeedback({
+        memberId: user.memberId,
+        memberName: user.fullName,
+        category: feedbackCategory,
+        rating: feedbackRating,
+        comment,
+        contactOptIn: feedbackContactOptIn,
+        contactInfo: feedbackContactInfo.trim() || null,
+      });
+      try {
+        await queueManagerFeedbackNotification(saved);
+      } catch {
+        // Feedback is already saved; notification failure should not block submission.
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to submit feedback.");
+      return;
+    }
 
     setFeedbackComment("");
     setFeedbackContactOptIn(false);
+    setFeedbackContactInfo("");
     toast.success("Feedback submitted. Thank you!");
   };
 
@@ -363,6 +372,12 @@ export default function CustomerEngagementPage() {
             <Label>Comments</Label>
             <Textarea maxLength={500} value={feedbackComment} onChange={(e) => setFeedbackComment(e.target.value)} placeholder="Share your suggestions (max 500 chars)" />
             <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={feedbackContactOptIn} onChange={(e) => setFeedbackContactOptIn(e.target.checked)} /> Contact me for follow-up</label>
+            <Label>Optional contact</Label>
+            <Input
+              value={feedbackContactInfo}
+              onChange={(e) => setFeedbackContactInfo(e.target.value)}
+              placeholder="Email or phone for follow-up"
+            />
             <Button onClick={handleFeedbackSubmit}>Submit Feedback</Button>
           </div>
         </Card>

@@ -26,7 +26,7 @@ import {
   type SurveyQuestion,
   type WinBackOfferType,
 } from "../../lib/member-engagement";
-import { loadFeedback } from "../../lib/member-lifecycle";
+import { loadFeedback, type FeedbackRecord } from "../../lib/member-lifecycle";
 
 const tabs = [
   { id: "notifications", label: "Push Notifications", icon: BellRing },
@@ -70,12 +70,17 @@ export default function AdminEngagementPage() {
   const [winBackName, setWinBackName] = useState("Dormant Members Recovery");
   const [winBackOffer, setWinBackOffer] = useState<WinBackOfferType>("2x Points");
   const [winBackValue, setWinBackValue] = useState("2x points on next purchase");
+  const [feedbackItems, setFeedbackItems] = useState<FeedbackRecord[]>([]);
 
   useEffect(() => {
     saveEngagementState(state);
   }, [state]);
 
-  const feedbackItems = useMemo(() => loadFeedback(), [state.surveys.length, state.notificationCampaigns.length]);
+  useEffect(() => {
+    loadFeedback()
+      .then(setFeedbackItems)
+      .catch(() => setFeedbackItems([]));
+  }, [state.surveys.length, state.notificationCampaigns.length]);
 
   const inactiveMembers = useMemo(
     () => buildInactiveMemberInsights(members, transactions, loginActivity),
@@ -320,6 +325,23 @@ export default function AdminEngagementPage() {
               </div>
             );
           })}
+        </div>
+        <div className="mt-4 space-y-2">
+          {feedbackItems.slice(0, 8).map((item) => (
+            <div key={item.id} className="rounded-lg border border-gray-200 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-[#10213a]">{item.memberName || item.memberId}</p>
+                <Badge variant="outline">{item.category}</Badge>
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                Rating {item.rating}/5 • {new Date(item.createdAt).toLocaleString()}
+                {item.contactOptIn ? " • follow-up requested" : ""}
+              </p>
+              <p className="mt-2 text-sm text-gray-700">{item.comment}</p>
+              {item.contactInfo ? <p className="mt-1 text-xs text-gray-500">Contact: {item.contactInfo}</p> : null}
+            </div>
+          ))}
+          {feedbackItems.length === 0 ? <p className="text-sm text-gray-500">No feedback submissions yet.</p> : null}
         </div>
       </section>
 

@@ -115,6 +115,21 @@ create table if not exists public.notification_outbox (
 alter table public.notification_outbox
   add column if not exists is_promotional boolean not null default false;
 
+create table if not exists public.member_feedback (
+  id bigserial primary key,
+  member_number text not null,
+  member_name text not null,
+  category text not null,
+  rating integer not null,
+  comment text not null,
+  contact_opt_in boolean not null default false,
+  contact_info text,
+  created_at timestamptz not null default now(),
+  constraint member_feedback_category_check check (category in ('points', 'rewards', 'service', 'app')),
+  constraint member_feedback_rating_check check (rating between 1 and 5),
+  constraint member_feedback_comment_length_check check (char_length(comment) <= 500)
+);
+
 create table if not exists public.loyalty_member_profile_audit (
   id bigserial primary key,
   member_id bigint references public.loyalty_members(id),
@@ -252,6 +267,11 @@ create index if not exists idx_notification_outbox_user_created
 on public.notification_outbox (user_id, created_at desc);
 create index if not exists idx_notification_outbox_status_created
 on public.notification_outbox (status, created_at desc);
+create index if not exists idx_notification_outbox_user_channel_promotional
+on public.notification_outbox (user_id, channel, created_at desc)
+where is_promotional = true;
+create index if not exists idx_member_feedback_created
+on public.member_feedback (created_at desc);
 create index if not exists idx_member_login_activity_member_date
 on public.member_login_activity (member_id, login_at desc);
 create index if not exists idx_member_reengagement_actions_member_date
@@ -425,6 +445,7 @@ $$;
 alter table public.loyalty_members enable row level security;
 alter table public.member_login_activity enable row level security;
 alter table public.member_reengagement_actions enable row level security;
+alter table public.member_feedback enable row level security;
 
 drop policy if exists loyalty_members_select_own on public.loyalty_members;
 create policy loyalty_members_select_own
@@ -509,6 +530,36 @@ for update
 to authenticated
 using (public.app_is_admin())
 with check (public.app_is_admin());
+
+drop policy if exists member_feedback_select on public.member_feedback;
+create policy member_feedback_select
+on public.member_feedback
+for select
+to authenticated
+using (
+  public.app_is_admin()
+  or exists (
+    select 1
+    from public.loyalty_members m
+    where m.member_number::text = member_feedback.member_number
+      and lower(m.email) = lower(public.app_current_email())
+  )
+);
+
+drop policy if exists member_feedback_insert on public.member_feedback;
+create policy member_feedback_insert
+on public.member_feedback
+for insert
+to authenticated
+with check (
+  public.app_is_admin()
+  or exists (
+    select 1
+    from public.loyalty_members m
+    where m.member_number::text = member_feedback.member_number
+      and lower(m.email) = lower(public.app_current_email())
+  )
+);
 
 drop policy if exists profile_photos_read on storage.objects;
 create policy profile_photos_read
@@ -607,6 +658,7 @@ set search_path = public
 as $$
 declare
   pref record;
+  recent_promotional_count integer := 0;
 begin
   if new.user_id is null then
     return new;
@@ -628,19 +680,35 @@ begin
     return new;
   end if;
 
-  if new.channel = 'sms' and coalesce(pref.sms_enabled, true) = false then
-    return null;
+  if coalesce(new.is_promotional, false) = false then
+    return new;
   end if;
 
-  if new.channel = 'email' and coalesce(pref.email_enabled, true) = false then
-    return null;
+  if new.channel = 'sms' and coalesce(pref.sms_enabled, true) = false then return null; end if;
+  if new.channel = 'email' and coalesce(pref.email_enabled, true) = false then return null; end if;
+  if new.channel = 'push' and coalesce(pref.push_enabled, true) = false then return null; end if;
+  if coalesce(pref.promotional_opt_in, true) = false then return null; end if;
+  if coalesce(pref.communication_frequency, 'weekly') = 'never' then return null; end if;
+
+  if coalesce(pref.communication_frequency, 'weekly') = 'daily' then
+    select count(*)
+    into recent_promotional_count
+    from public.notification_outbox n
+    where n.user_id = new.user_id
+      and n.channel = new.channel
+      and coalesce(n.is_promotional, false) = true
+      and n.created_at >= date_trunc('day', now());
+  elsif coalesce(pref.communication_frequency, 'weekly') = 'weekly' then
+    select count(*)
+    into recent_promotional_count
+    from public.notification_outbox n
+    where n.user_id = new.user_id
+      and n.channel = new.channel
+      and coalesce(n.is_promotional, false) = true
+      and n.created_at >= (now() - interval '7 days');
   end if;
 
-  if new.channel = 'push' and coalesce(pref.push_enabled, true) = false then
-    return null;
-  end if;
-
-  if coalesce(new.is_promotional, false) = true and coalesce(pref.promotional_opt_in, true) = false then
+  if recent_promotional_count > 0 then
     return null;
   end if;
 

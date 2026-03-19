@@ -4,7 +4,6 @@ import type { MemberData } from "../types/loyalty";
 const STORAGE_KEYS = {
   referrals: "centralperk-referrals-v1",
   birthdayClaims: "centralperk-birthday-claims-v1",
-  feedback: "centralperk-feedback-v1",
 } as const;
 
 export type MemberSegment = "High Value" | "Active" | "At Risk" | "Inactive";
@@ -42,6 +41,7 @@ export interface FeedbackRecord {
   rating: 1 | 2 | 3 | 4 | 5;
   comment: string;
   contactOptIn: boolean;
+  contactInfo: string | null;
   createdAt: string;
 }
 
@@ -215,9 +215,10 @@ export function canSendNotificationByPreference(
   isTransactional: boolean
 ) {
   if (isTransactional) {
-    return channel === "sms" ? pref.sms : channel === "email" ? pref.email : pref.push;
+    return true;
   }
 
+  if (pref.frequency === "never") return false;
   if (!pref.promotionalOptIn) return false;
   return channel === "sms" ? pref.sms : channel === "email" ? pref.email : pref.push;
 }
@@ -293,24 +294,84 @@ export function markBirthdayClaimed(memberId: string) {
   saveJson(STORAGE_KEYS.birthdayClaims, claims);
 }
 
-export function submitFeedback(entry: Omit<FeedbackRecord, "id" | "createdAt">) {
-  const record: FeedbackRecord = { ...entry, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
-  const rows = loadJson<FeedbackRecord[]>(STORAGE_KEYS.feedback, []);
-  rows.unshift(record);
-  saveJson(STORAGE_KEYS.feedback, rows);
-  return record;
+const feedbackCategories = new Set<FeedbackRecord["category"]>(["points", "rewards", "service", "app"]);
+
+function normalizeFeedbackRow(row: Record<string, unknown>): FeedbackRecord {
+  const category = String(row.category || "service").toLowerCase() as FeedbackRecord["category"];
+  const rating = Math.max(1, Math.min(5, Number(row.rating) || 5)) as FeedbackRecord["rating"];
+  return {
+    id: String(row.id ?? crypto.randomUUID()),
+    memberId: String(row.member_number ?? row.member_id ?? ""),
+    memberName: String(row.member_name ?? ""),
+    category: feedbackCategories.has(category) ? category : "service",
+    rating,
+    comment: String(row.comment ?? ""),
+    contactOptIn: Boolean(row.contact_opt_in),
+    contactInfo: row.contact_info ? String(row.contact_info) : null,
+    createdAt: String(row.created_at ?? new Date().toISOString()),
+  };
 }
 
-export function loadFeedback(): FeedbackRecord[] {
-  return loadJson<FeedbackRecord[]>(STORAGE_KEYS.feedback, []);
+export async function submitFeedback(entry: Omit<FeedbackRecord, "id" | "createdAt">) {
+  if (!feedbackCategories.has(entry.category)) {
+    throw new Error("Feedback category must be one of: points, rewards, service, app.");
+  }
+  if (entry.rating < 1 || entry.rating > 5) {
+    throw new Error("Rating must be between 1 and 5.");
+  }
+  const comment = entry.comment.trim();
+  if (!comment) {
+    throw new Error("Feedback comment is required.");
+  }
+  if (comment.length > 500) {
+    throw new Error("Feedback comment must be 500 characters or less.");
+  }
+
+  const { data, error } = await supabase
+    .from("member_feedback")
+    .insert({
+      member_number: entry.memberId,
+      member_name: entry.memberName.trim(),
+      category: entry.category,
+      rating: entry.rating,
+      comment,
+      contact_opt_in: Boolean(entry.contactOptIn),
+      contact_info: entry.contactInfo?.trim() ? entry.contactInfo.trim() : null,
+    })
+    .select("id,member_number,member_name,category,rating,comment,contact_opt_in,contact_info,created_at")
+    .single();
+  if (error) throw error;
+  return normalizeFeedbackRow((data ?? {}) as Record<string, unknown>);
+}
+
+export async function loadFeedback(): Promise<FeedbackRecord[]> {
+  const { data, error } = await supabase
+    .from("member_feedback")
+    .select("id,member_number,member_name,category,rating,comment,contact_opt_in,contact_info,created_at")
+    .order("created_at", { ascending: false })
+    .limit(300);
+  if (error) throw error;
+  return (data || []).map((row) => normalizeFeedbackRow(row as Record<string, unknown>));
 }
 
 export async function queueManagerFeedbackNotification(record: FeedbackRecord) {
-  const res = await supabase.from("notification_outbox").insert({
-    user_id: null,
-    channel: "email",
-    subject: `New feedback: ${record.category}`,
-    message: `${record.memberName} rated ${record.rating}/5. ${record.comment.slice(0, 180)}`,
-  });
+  const admins = await supabase
+    .from("app_user_roles")
+    .select("user_id")
+    .eq("role", "admin");
+  if (admins.error) throw admins.error;
+  const rows = (admins.data || [])
+    .map((item) => String(item.user_id || "").trim())
+    .filter(Boolean)
+    .map((userId) => ({
+      user_id: userId,
+      channel: "email" as const,
+      subject: `New feedback: ${record.category}`,
+      message: `${record.memberName} rated ${record.rating}/5. ${record.comment.slice(0, 180)}`,
+      is_promotional: false,
+    }));
+  if (rows.length === 0) return;
+
+  const res = await supabase.from("notification_outbox").insert(rows);
   if (res.error) throw res.error;
 }
