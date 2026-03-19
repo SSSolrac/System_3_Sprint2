@@ -14,6 +14,16 @@ import {
 } from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
+import {
+  buildSegmentStats,
+  deriveAutoSegment,
+  exportMembersCsv,
+  loadManualSegments,
+  saveManualSegment,
+  type MemberSegment,
+} from "../../lib/member-lifecycle";
+
+const baseSegments: Array<MemberSegment | "Manual"> = ["High Value", "Active", "At Risk", "Inactive", "Manual"];
 
 export default function AdminMembersPage() {
   const { members, loading, error, refetch } = useAdminData();
@@ -23,6 +33,8 @@ export default function AdminMembersPage() {
   const [manualAwardMember, setManualAwardMember] = useState<(typeof members)[number] | null>(null);
   const [awardPoints, setAwardPoints] = useState("");
   const [awardReason, setAwardReason] = useState("");
+  const [manualSegmentDraft, setManualSegmentDraft] = useState<Record<string, string>>(() => loadManualSegments());
+  const [segmentFilter, setSegmentFilter] = useState<string>("All");
 
   const closeManualAwardDialog = () => {
     setManualAwardMember(null);
@@ -63,22 +75,57 @@ export default function AdminMembersPage() {
     }
   };
 
+  const segmentedMembers = useMemo(() => {
+    const byMember = members.map((member) => {
+      const key = String(member.member_id || member.id || member.member_number);
+      const manual = manualSegmentDraft[key];
+      const auto = deriveAutoSegment(member);
+      return {
+        ...member,
+        autoSegment: auto,
+        segment: manual || auto,
+        isManual: Boolean(manual),
+      };
+    });
+
+    return byMember;
+  }, [members, manualSegmentDraft]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return members;
-    return members.filter((m) => {
+    return segmentedMembers.filter((m) => {
       const fullName = `${m.first_name} ${m.last_name}`.toLowerCase();
       const memberNumber = String(m.member_number || "").toLowerCase();
       const phone = String(m.phone || "").toLowerCase();
       const email = String(m.email || "").toLowerCase();
-      return (
-        memberNumber.includes(q) ||
-        phone.includes(q) ||
-        email.includes(q) ||
-        fullName.includes(q)
-      );
+      const matchesSearch = !q || memberNumber.includes(q) || phone.includes(q) || email.includes(q) || fullName.includes(q);
+      const matchesSegment =
+        segmentFilter === "All" ? true : segmentFilter === "Manual" ? m.isManual : m.segment === segmentFilter;
+      return matchesSearch && matchesSegment;
     });
-  }, [members, query]);
+  }, [segmentedMembers, query, segmentFilter]);
+
+  const stats = useMemo(() => buildSegmentStats(segmentedMembers.length, segmentedMembers.map((m) => m.segment)), [segmentedMembers]);
+
+  const handleManualSegmentSave = (memberId: string, value: string) => {
+    if (!value.trim()) return;
+    saveManualSegment(memberId, value);
+    setManualSegmentDraft((prev) => ({ ...prev, [memberId]: value.trim() }));
+    toast.success("Manual segment saved.");
+  };
+
+  const handleExport = () => {
+    exportMembersCsv(
+      filtered.map((m) => ({
+        memberNumber: m.member_number,
+        name: `${m.first_name} ${m.last_name}`,
+        email: m.email,
+        phone: m.phone || "",
+        segment: m.segment,
+      }))
+    );
+    toast.success("Segment list exported.");
+  };
 
   if (loading) return <p className="text-base text-gray-700">Loading members...</p>;
   if (error) return <p className="text-red-600">{error}</p>;
@@ -86,11 +133,38 @@ export default function AdminMembersPage() {
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Member Lookup</h1>
-        <p className="text-gray-500 mt-1">Search and review loyalty members</p>
+        <h1 className="text-2xl font-bold text-gray-900">Member Segmentation & Lookup</h1>
+        <p className="text-gray-500 mt-1">Auto-segment members, manage manual segments, and export target lists.</p>
       </div>
 
-      <MemberLookup onSearch={setQuery} isLoading={loading} />
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+        {stats.map((item) => (
+          <div key={item.segment} className="rounded-xl border border-[#9ed8ff] bg-[#f8fcff] p-4">
+            <p className="text-xs uppercase tracking-wide text-[#1A2B47]">{item.segment}</p>
+            <p className="mt-2 text-2xl font-bold text-[#10213a]">{item.count}</p>
+            <p className="text-xs text-gray-600">{item.share.toFixed(1)}% of members</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap gap-3 items-end">
+        <MemberLookup onSearch={setQuery} isLoading={loading} />
+        <div>
+          <Label htmlFor="segment-filter">Filter by segment</Label>
+          <select
+            id="segment-filter"
+            className="mt-1 rounded-md border border-gray-300 px-3 py-2 text-sm"
+            value={segmentFilter}
+            onChange={(e) => setSegmentFilter(e.target.value)}
+          >
+            <option value="All">All segments</option>
+            {baseSegments.map((segment) => (
+              <option key={segment} value={segment}>{segment}</option>
+            ))}
+          </select>
+        </div>
+        <Button onClick={handleExport} className="bg-[#1A2B47] text-white hover:bg-[#152238]">Export Segment List</Button>
+      </div>
 
       {selectedMember ? (
         <div className="bg-[#f8fcff] rounded-xl p-5 border border-[#9ed8ff]">
@@ -123,36 +197,18 @@ export default function AdminMembersPage() {
           <div className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="award-points">Points to Award</Label>
-              <Input
-                id="award-points"
-                type="number"
-                min="1"
-                step="1"
-                value={awardPoints}
-                onChange={(e) => setAwardPoints(e.target.value)}
-                placeholder="Enter points"
-              />
+              <Input id="award-points" type="number" min="1" step="1" value={awardPoints} onChange={(e) => setAwardPoints(e.target.value)} placeholder="Enter points" />
             </div>
 
             <div className="space-y-2">
               <Label htmlFor="award-reason">Reason</Label>
-              <Input
-                id="award-reason"
-                value={awardReason}
-                onChange={(e) => setAwardReason(e.target.value)}
-                placeholder="Enter reason for manual award"
-              />
+              <Input id="award-reason" value={awardReason} onChange={(e) => setAwardReason(e.target.value)} placeholder="Enter reason for manual award" />
             </div>
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={closeManualAwardDialog}>
-              Cancel
-            </Button>
-            <Button
-              onClick={handleManualAward}
-              disabled={awardingMember === manualAwardMember?.member_number}
-            >
+            <Button variant="outline" onClick={closeManualAwardDialog}>Cancel</Button>
+            <Button onClick={handleManualAward} disabled={awardingMember === manualAwardMember?.member_number}>
               {awardingMember === manualAwardMember?.member_number ? "Awarding..." : "Confirm Award"}
             </Button>
           </DialogFooter>
@@ -170,48 +226,53 @@ export default function AdminMembersPage() {
                 <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Email</th>
                 <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Mobile</th>
                 <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Points</th>
-                <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Joined</th>
+                <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Segment</th>
+                <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Manual Segment</th>
                 <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {filtered.map((member) => (
-                <tr key={member.member_id || String(member.id)} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-                  <td className="py-4 px-4 text-sm font-medium text-gray-800">{member.member_number}</td>
-                  <td className="py-4 px-4 text-sm text-gray-700">{member.first_name} {member.last_name}</td>
-                  <td className="py-4 px-4 text-sm text-gray-600">{member.email}</td>
-                  <td className="py-4 px-4 text-sm text-gray-600">{member.phone || "-"}</td>
-                  <td className="py-4 px-4 text-sm font-semibold text-gray-800">
-                    {(member.points_balance || 0).toLocaleString()}
-                  </td>
-                  <td className="py-4 px-4 text-sm text-gray-600">
-                    {member.enrollment_date ? new Date(member.enrollment_date).toLocaleDateString() : "-"}
-                  </td>
-                  <td className="py-4 px-4">
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedMember(member)}
-                        className="rounded-md border border-[#1A2B47] px-3 py-1.5 text-xs font-semibold text-[#1A2B47] hover:bg-[#f5f7fb]"
-                      >
-                        View Profile
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setManualAwardMember(member);
-                          setAwardPoints("");
-                          setAwardReason("");
-                        }}
-                        disabled={awardingMember === member.member_number}
-                        className="rounded-md bg-[#00A3AD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#08939c] disabled:opacity-60"
-                      >
-                        {awardingMember === member.member_number ? "Awarding..." : "Manual Award"}
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {filtered.map((member) => {
+                const key = String(member.member_id || member.id || member.member_number);
+                return (
+                  <tr key={key} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+                    <td className="py-4 px-4 text-sm font-medium text-gray-800">{member.member_number}</td>
+                    <td className="py-4 px-4 text-sm text-gray-700">{member.first_name} {member.last_name}</td>
+                    <td className="py-4 px-4 text-sm text-gray-600">{member.email}</td>
+                    <td className="py-4 px-4 text-sm text-gray-600">{member.phone || "-"}</td>
+                    <td className="py-4 px-4 text-sm font-semibold text-gray-800">{(member.points_balance || 0).toLocaleString()}</td>
+                    <td className="py-4 px-4 text-sm text-gray-700">{member.segment}{member.isManual ? " (manual)" : ""}</td>
+                    <td className="py-4 px-4 text-sm text-gray-600">
+                      <div className="flex items-center gap-2">
+                        <Input
+                          value={manualSegmentDraft[key] || ""}
+                          onChange={(e) => setManualSegmentDraft((prev) => ({ ...prev, [key]: e.target.value }))}
+                          placeholder="e.g. VIP Retail"
+                          className="h-8 text-xs"
+                        />
+                        <Button variant="outline" className="h-8 text-xs" onClick={() => handleManualSegmentSave(key, manualSegmentDraft[key] || "")}>Save</Button>
+                      </div>
+                    </td>
+                    <td className="py-4 px-4">
+                      <div className="flex gap-2">
+                        <button type="button" onClick={() => setSelectedMember(member)} className="rounded-md border border-[#1A2B47] px-3 py-1.5 text-xs font-semibold text-[#1A2B47] hover:bg-[#f5f7fb]">View</button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setManualAwardMember(member);
+                            setAwardPoints("");
+                            setAwardReason("");
+                          }}
+                          disabled={awardingMember === member.member_number}
+                          className="rounded-md bg-[#00A3AD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#08939c] disabled:opacity-60"
+                        >
+                          {awardingMember === member.member_number ? "Awarding..." : "Award"}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           {filtered.length === 0 ? <p className="py-6 text-gray-500">No matching members found.</p> : null}
