@@ -26,7 +26,7 @@ import {
   type SurveyQuestion,
   type WinBackOfferType,
 } from "../../lib/member-engagement";
-import { loadFeedback } from "../../lib/member-lifecycle";
+import { loadAllReferrals, loadFeedback, type FeedbackRecord, type ReferralRecord } from "../../lib/member-lifecycle";
 
 const tabs = [
   { id: "notifications", label: "Push Notifications", icon: BellRing },
@@ -70,12 +70,24 @@ export default function AdminEngagementPage() {
   const [winBackName, setWinBackName] = useState("Dormant Members Recovery");
   const [winBackOffer, setWinBackOffer] = useState<WinBackOfferType>("2x Points");
   const [winBackValue, setWinBackValue] = useState("2x points on next purchase");
+  const [feedbackItems, setFeedbackItems] = useState<FeedbackRecord[]>([]);
+  const [referralItems, setReferralItems] = useState<ReferralRecord[]>([]);
 
   useEffect(() => {
     saveEngagementState(state);
   }, [state]);
 
-  const feedbackItems = useMemo(() => loadFeedback(), [state.surveys.length, state.notificationCampaigns.length]);
+  useEffect(() => {
+    loadFeedback()
+      .then(setFeedbackItems)
+      .catch(() => setFeedbackItems([]));
+  }, [state.surveys.length, state.notificationCampaigns.length]);
+
+  useEffect(() => {
+    loadAllReferrals()
+      .then(setReferralItems)
+      .catch(() => setReferralItems([]));
+  }, [state.notificationCampaigns.length]);
 
   const inactiveMembers = useMemo(
     () => buildInactiveMemberInsights(members, transactions, loginActivity),
@@ -298,6 +310,34 @@ export default function AdminEngagementPage() {
         </div>
       </section>
 
+      <section className="rounded-2xl border border-[#dbe7f3] bg-white p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-[#10213a]">Referral Tracking</h3>
+            <p className="text-sm text-gray-500">Invites, joins, and conversion bonuses.</p>
+          </div>
+          <Badge>{referralItems.length} invites</Badge>
+        </div>
+        <p className="mt-2 text-sm text-gray-600">
+          Conversions: {referralItems.filter((item) => item.status === "joined").length} • Bonuses awarded:{" "}
+          {referralItems.filter((item) => item.bonusAwarded).length}
+        </p>
+        <div className="mt-3 space-y-2">
+          {referralItems.slice(0, 10).map((row) => (
+            <div key={row.id} className="rounded-lg border border-gray-200 p-3">
+              <p className="text-sm font-semibold text-[#10213a]">
+                Referrer {row.referrerMemberId} → {row.refereeEmail}
+              </p>
+              <p className="text-xs text-gray-500">
+                {row.status === "joined" ? "Joined" : "Pending"} • Code {row.referrerCode}
+                {row.bonusAwarded ? " • Bonus awarded" : ""}
+              </p>
+            </div>
+          ))}
+          {referralItems.length === 0 ? <p className="text-sm text-gray-500">No referral records yet.</p> : null}
+        </div>
+      </section>
+
 
 
       <section className="rounded-2xl border border-[#dbe7f3] bg-white p-5">
@@ -320,6 +360,23 @@ export default function AdminEngagementPage() {
               </div>
             );
           })}
+        </div>
+        <div className="mt-4 space-y-2">
+          {feedbackItems.slice(0, 8).map((item) => (
+            <div key={item.id} className="rounded-lg border border-gray-200 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-[#10213a]">{item.memberName || item.memberId}</p>
+                <Badge variant="outline">{item.category}</Badge>
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                Rating {item.rating}/5 • {new Date(item.createdAt).toLocaleString()}
+                {item.contactOptIn ? " • follow-up requested" : ""}
+              </p>
+              <p className="mt-2 text-sm text-gray-700">{item.comment}</p>
+              {item.contactInfo ? <p className="mt-1 text-xs text-gray-500">Contact: {item.contactInfo}</p> : null}
+            </div>
+          ))}
+          {feedbackItems.length === 0 ? <p className="text-sm text-gray-500">No feedback submissions yet.</p> : null}
         </div>
       </section>
 
