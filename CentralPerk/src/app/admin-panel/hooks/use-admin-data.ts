@@ -30,6 +30,15 @@ type TierHistoryRow = {
   changed_at: string;
 };
 
+type MemberSegmentRow = {
+  member_id: string | number;
+  member_number: string;
+  auto_segment: string | null;
+  manual_segment: string | null;
+  effective_segment: string | null;
+  last_activity_at: string | null;
+};
+
 function transactionLabel(tx: LoyaltyTransaction) {
   return String(tx.reason ?? tx.description ?? "").trim();
 }
@@ -111,6 +120,7 @@ export function useAdminData() {
 
       const [
         membersRes,
+        memberSegmentsRes,
         redemptionsRes,
         transactionsRes,
         tierHistoryRes,
@@ -123,6 +133,7 @@ export function useAdminData() {
         redemptionSettingsRes,
       ] = await Promise.all([
         supabase.from("loyalty_members").select("*").order("enrollment_date", { ascending: false }),
+        supabase.rpc("loyalty_member_segments"),
         supabase.from("loyalty_transactions").select("*").eq("transaction_type", "REDEEM"),
         supabase
           .from("loyalty_transactions")
@@ -145,6 +156,7 @@ export function useAdminData() {
       ]);
 
       if (membersRes.error) throw membersRes.error;
+      if (memberSegmentsRes.error) throw memberSegmentsRes.error;
       if (transactionsRes.error) throw transactionsRes.error;
       if (pointsLotsRes.error && !isMissingRelationError(pointsLotsRes.error, "points_lots")) throw pointsLotsRes.error;
       if (rewardsCatalogRes.error && !isMissingRelationError(rewardsCatalogRes.error, "rewards_catalog")) throw rewardsCatalogRes.error;
@@ -153,7 +165,31 @@ export function useAdminData() {
         throw reengagementActionsRes.error;
       }
 
-      setMembers((membersRes.data || []) as Member[]);
+      const segmentRows = (memberSegmentsRes.data || []) as MemberSegmentRow[];
+      const segmentByMemberId = new Map<string, MemberSegmentRow>();
+      const segmentByMemberNumber = new Map<string, MemberSegmentRow>();
+      for (const row of segmentRows) {
+        const memberIdKey = String(row.member_id ?? "");
+        const memberNumberKey = String(row.member_number ?? "");
+        if (memberIdKey) segmentByMemberId.set(memberIdKey, row);
+        if (memberNumberKey) segmentByMemberNumber.set(memberNumberKey, row);
+      }
+
+      const membersWithSegments = ((membersRes.data || []) as Member[]).map((member) => {
+        const byId = segmentByMemberId.get(String(member.id ?? member.member_id ?? ""));
+        const byNumber = segmentByMemberNumber.get(String(member.member_number ?? ""));
+        const segment = byId || byNumber;
+        if (!segment) return member;
+        return {
+          ...member,
+          auto_segment: (segment.auto_segment as Member["auto_segment"]) ?? null,
+          manual_segment: (segment.manual_segment as Member["manual_segment"]) ?? null,
+          effective_segment: (segment.effective_segment as Member["effective_segment"]) ?? null,
+          last_activity_at: segment.last_activity_at ?? null,
+        };
+      });
+
+      setMembers(membersWithSegments);
       setRedemptions(redemptionsRes.error ? [] : ((redemptionsRes.data || []) as LoyaltyTransaction[]));
       setTransactions((transactionsRes.data || []) as LoyaltyTransaction[]);
       setTierHistory((tierHistoryRes.error ? [] : tierHistoryRes.data || []) as TierHistoryRow[]);

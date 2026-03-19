@@ -16,7 +16,6 @@ import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
 import {
   buildSegmentStats,
-  deriveAutoSegment,
   exportMembersCsv,
   saveManualSegment,
   type MemberSegment,
@@ -25,7 +24,7 @@ import {
 const baseSegments: Array<MemberSegment | "Manual"> = ["High Value", "Active", "At Risk", "Inactive", "Manual"];
 
 export default function AdminMembersPage() {
-  const { members, transactions, loading, error, refetch } = useAdminData();
+  const { members, loading, error, refetch } = useAdminData();
   const [query, setQuery] = useState("");
   const [awardingMember, setAwardingMember] = useState<string | null>(null);
   const [selectedMember, setSelectedMember] = useState<(typeof members)[number] | null>(null);
@@ -75,32 +74,17 @@ export default function AdminMembersPage() {
   };
 
   const segmentedMembers = useMemo(() => {
-    const latestTxByMember = new Map<string, string>();
-    for (const tx of transactions) {
-      const key = String(tx.member_id || "");
-      const at = String(tx.transaction_date || "");
-      if (!key || !at) continue;
-      const existing = latestTxByMember.get(key);
-      if (!existing || new Date(at).getTime() > new Date(existing).getTime()) {
-        latestTxByMember.set(key, at);
-      }
-    }
-
     const byMember = members.map((member) => {
-      const key = String(member.member_id || member.id || member.member_number);
-      const manual = manualSegmentDraft[key] || member.manual_segment || "";
-      const lastActivity = latestTxByMember.get(String(member.id || member.member_id || ""));
-      const auto = deriveAutoSegment(member, lastActivity);
+      const effectiveSegment = member.effective_segment || member.auto_segment || "Inactive";
       return {
         ...member,
-        autoSegment: auto,
-        segment: manual || auto,
-        isManual: Boolean(manual),
+        segment: effectiveSegment,
+        isManual: Boolean(member.manual_segment),
       };
     });
 
     return byMember;
-  }, [members, transactions, manualSegmentDraft]);
+  }, [members, manualSegmentDraft]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

@@ -1,5 +1,5 @@
 export interface Member {
-  member_id: string;
+  member_id: string | number;
   id?: string | number;
   member_number: string;
   first_name: string;
@@ -10,6 +10,9 @@ export interface Member {
   points_balance?: number;
   tier?: string;
   manual_segment?: "High Value" | "Active" | "At Risk" | "Inactive" | null;
+  auto_segment?: "High Value" | "Active" | "At Risk" | "Inactive" | null;
+  effective_segment?: "High Value" | "Active" | "At Risk" | "Inactive" | null;
+  last_activity_at?: string | null;
   sms_enabled?: boolean;
   email_enabled?: boolean;
   push_enabled?: boolean;
