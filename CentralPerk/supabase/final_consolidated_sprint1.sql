@@ -131,6 +131,40 @@ create table if not exists public.member_feedback (
   constraint member_feedback_comment_length_check check (char_length(comment) <= 500)
 );
 
+create table if not exists public.member_referrals (
+  id bigserial primary key,
+  referrer_member_id bigint not null references public.loyalty_members(id) on delete cascade,
+  referrer_code text not null,
+  referee_email text not null,
+  referee_email_normalized text generated always as (lower(trim(referee_email))) stored,
+  referee_member_id bigint references public.loyalty_members(id) on delete set null,
+  status text not null default 'pending',
+  converted_at timestamptz,
+  bonus_awarded boolean not null default false,
+  referrer_bonus_txn_id bigint references public.loyalty_transactions(id) on delete set null,
+  referee_bonus_txn_id bigint references public.loyalty_transactions(id) on delete set null,
+  created_at timestamptz not null default now(),
+  constraint member_referrals_status_check check (status in ('pending', 'joined'))
+);
+
+create unique index if not exists uq_member_referrals_referrer_email
+on public.member_referrals (referrer_member_id, referee_email_normalized);
+
+create table if not exists public.member_birthday_rewards (
+  id bigserial primary key,
+  member_id bigint not null references public.loyalty_members(id) on delete cascade,
+  reward_year integer not null,
+  tier_at_award text not null,
+  points_awarded integer not null,
+  voucher_code text not null,
+  voucher_expires_at date not null,
+  source text not null default 'auto',
+  created_at timestamptz not null default now(),
+  constraint member_birthday_rewards_source_check check (source in ('auto', 'manual')),
+  constraint member_birthday_rewards_unique_member_year unique (member_id, reward_year),
+  constraint member_birthday_rewards_unique_voucher unique (voucher_code)
+);
+
 create table if not exists public.loyalty_member_profile_audit (
   id bigserial primary key,
   member_id bigint references public.loyalty_members(id),
@@ -446,10 +480,10 @@ $$;
 -- RLS AND STORAGE POLICIES
 -- ============================================================
 
-alter table public.loyalty_members enable row level security;
-alter table public.member_login_activity enable row level security;
-alter table public.member_reengagement_actions enable row level security;
-alter table public.member_feedback enable row level security;
+alter table public.loyalty_members disable row level security;
+alter table public.member_login_activity disable row level security;
+alter table public.member_reengagement_actions disable row level security;
+alter table public.member_feedback disable row level security;
 
 drop policy if exists loyalty_members_select_own on public.loyalty_members;
 create policy loyalty_members_select_own

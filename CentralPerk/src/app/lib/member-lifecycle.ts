@@ -434,24 +434,6 @@ function normalizeFeedbackRow(row: Record<string, unknown>): FeedbackRecord {
   };
 }
 
-const feedbackCategories = new Set<FeedbackRecord["category"]>(["points", "rewards", "service", "app"]);
-
-function normalizeFeedbackRow(row: Record<string, unknown>): FeedbackRecord {
-  const category = String(row.category || "service").toLowerCase() as FeedbackRecord["category"];
-  const rating = Math.max(1, Math.min(5, Number(row.rating) || 5)) as FeedbackRecord["rating"];
-  return {
-    id: String(row.id ?? crypto.randomUUID()),
-    memberId: String(row.member_number ?? row.member_id ?? ""),
-    memberName: String(row.member_name ?? ""),
-    category: feedbackCategories.has(category) ? category : "service",
-    rating,
-    comment: String(row.comment ?? ""),
-    contactOptIn: Boolean(row.contact_opt_in),
-    contactInfo: row.contact_info ? String(row.contact_info) : null,
-    createdAt: String(row.created_at ?? new Date().toISOString()),
-  };
-}
-
 export async function submitFeedback(entry: Omit<FeedbackRecord, "id" | "createdAt">) {
   if (!feedbackCategories.has(entry.category)) {
     throw new Error("Feedback category must be one of: points, rewards, service, app.");
