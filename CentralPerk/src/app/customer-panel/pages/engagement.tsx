@@ -12,6 +12,17 @@ import { Textarea } from "../../components/ui/textarea";
 import type { AppOutletContext } from "../../types/app-context";
 import { awardMemberPoints } from "../../lib/loyalty-supabase";
 import {
+  buildReferralCode,
+  createReferral,
+  getBirthdayRewardPoints,
+  hasBirthdayClaimedThisYear,
+  isBirthdayMonth,
+  loadReferrals,
+  markBirthdayClaimed,
+  queueManagerFeedbackNotification,
+  submitFeedback,
+} from "../../lib/member-lifecycle";
+import {
   buildShareAssetDataUrl,
   getChallengeProgress,
   getMemberPrivacySettings,
@@ -30,6 +41,11 @@ export default function CustomerEngagementPage() {
   const [surveyAnswers, setSurveyAnswers] = useState<Record<string, Record<string, string>>>({});
   const [submittingSurveyId, setSubmittingSurveyId] = useState<string | null>(null);
   const [claimingChallengeId, setClaimingChallengeId] = useState<string | null>(null);
+  const [referralEmail, setReferralEmail] = useState("");
+  const [feedbackCategory, setFeedbackCategory] = useState<"points" | "rewards" | "service" | "app">("service");
+  const [feedbackRating, setFeedbackRating] = useState<1 | 2 | 3 | 4 | 5>(5);
+  const [feedbackComment, setFeedbackComment] = useState("");
+  const [feedbackContactOptIn, setFeedbackContactOptIn] = useState(false);
 
   useEffect(() => {
     saveEngagementState(state);
@@ -39,7 +55,7 @@ export default function CustomerEngagementPage() {
     () => getMemberPrivacySettings(state, user.memberId),
     [state, user.memberId]
   );
-  const referralCode = `${user.memberId || "MEMBER"}-${user.tier}`.replace(/\s+/g, "").toUpperCase();
+  const referralCode = buildReferralCode(user);
   const sharePreview = useMemo(
     () =>
       buildShareAssetDataUrl({
@@ -137,6 +153,82 @@ export default function CustomerEngagementPage() {
     }
   };
 
+
+
+  const myReferrals = useMemo(() => loadReferrals().filter((item) => item.referrerMemberId === user.memberId), [state.shareEvents.length, user.memberId]);
+
+  const handleCreateReferral = () => {
+    const email = referralEmail.trim().toLowerCase();
+    if (!email || !email.includes("@")) {
+      toast.error("Enter a valid friend email.");
+      return;
+    }
+
+    createReferral({
+      referrerMemberId: user.memberId,
+      referrerCode: referralCode,
+      refereeEmail: email,
+    });
+    setReferralEmail("");
+    toast.success("Referral created. Share your code via SMS, email, or QR flow.");
+  };
+
+  const handleBirthdayClaim = async () => {
+    if (!isBirthdayMonth(user)) {
+      toast.error("Birthday rewards unlock on your birthday month.");
+      return;
+    }
+    if (hasBirthdayClaimedThisYear(user.memberId)) {
+      toast.error("Birthday reward already claimed this year.");
+      return;
+    }
+
+    const rewardPoints = getBirthdayRewardPoints(user.tier);
+    try {
+      await awardMemberPoints({
+        memberIdentifier: user.memberId,
+        fallbackEmail: user.email,
+        points: rewardPoints,
+        transactionType: "MANUAL_AWARD",
+        reason: `Birthday reward (${new Date().getFullYear()})`,
+      });
+      markBirthdayClaimed(user.memberId);
+      await refreshUser();
+      toast.success(`Birthday reward credited: +${rewardPoints} points.`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to claim birthday reward.");
+    }
+  };
+
+  const handleFeedbackSubmit = async () => {
+    const comment = feedbackComment.trim();
+    if (!comment) {
+      toast.error("Feedback comment is required.");
+      return;
+    }
+    if (comment.length > 500) {
+      toast.error("Feedback must be 500 characters or less.");
+      return;
+    }
+
+    const saved = submitFeedback({
+      memberId: user.memberId,
+      memberName: user.fullName,
+      category: feedbackCategory,
+      rating: feedbackRating,
+      comment,
+      contactOptIn: feedbackContactOptIn,
+    });
+
+    try {
+      await queueManagerFeedbackNotification(saved);
+    } catch {}
+
+    setFeedbackComment("");
+    setFeedbackContactOptIn(false);
+    toast.success("Feedback submitted. Thank you!");
+  };
+
   const handleSurveyAnswerChange = (surveyId: string, questionId: string, value: string) => {
     setSurveyAnswers((prev) => ({
       ...prev,
@@ -232,6 +324,49 @@ export default function CustomerEngagementPage() {
           </div>
         </div>
       </Card>
+
+
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <Card className="p-6">
+          <h2 className="text-xl font-semibold text-gray-900">Referral Program</h2>
+          <p className="text-sm text-gray-500 mt-1">Share your code and earn 500 points when friends join. Friends earn 200 points.</p>
+          <p className="mt-3 text-sm">Your referral code: <span className="font-bold text-[#10213a]">{referralCode}</span></p>
+          <div className="mt-3 space-y-2">
+            <Label htmlFor="referral-email">Friend email</Label>
+            <Input id="referral-email" value={referralEmail} onChange={(e) => setReferralEmail(e.target.value)} placeholder="friend@email.com" />
+            <Button onClick={handleCreateReferral} className="bg-[#1A2B47] text-white hover:bg-[#152238]">Create Referral</Button>
+          </div>
+          <p className="mt-4 text-xs text-gray-500">Tracked referrals: {myReferrals.length} • Conversions: {myReferrals.filter((r) => r.status === "joined").length}</p>
+        </Card>
+
+        <Card className="p-6">
+          <h2 className="text-xl font-semibold text-gray-900">Birthday Rewards</h2>
+          <p className="text-sm text-gray-500 mt-1">Auto-credited on the 1st of your birthday month. Claim once per year.</p>
+          <p className="mt-3 text-sm">Current tier bonus: <span className="font-semibold">{getBirthdayRewardPoints(user.tier)} points</span></p>
+          <p className="mt-1 text-xs text-gray-500">Voucher + birthday badge are included in your month benefits.</p>
+          <Button onClick={handleBirthdayClaim} className="mt-3 bg-[#00A3AD] text-white hover:bg-[#08939c]" disabled={!isBirthdayMonth(user) || hasBirthdayClaimedThisYear(user.memberId)}>
+            {hasBirthdayClaimedThisYear(user.memberId) ? "Claimed this year" : "Claim Birthday Reward"}
+          </Button>
+        </Card>
+
+        <Card className="p-6">
+          <h2 className="text-xl font-semibold text-gray-900">Feedback</h2>
+          <p className="text-sm text-gray-500 mt-1">Rate your experience and help us improve.</p>
+          <div className="mt-3 space-y-2">
+            <Label>Category</Label>
+            <select className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm" value={feedbackCategory} onChange={(e) => setFeedbackCategory(e.target.value as any)}>
+              <option value="points">Points</option><option value="rewards">Rewards</option><option value="service">Service</option><option value="app">App</option>
+            </select>
+            <Label>Rating (1-5)</Label>
+            <Input type="number" min={1} max={5} value={feedbackRating} onChange={(e) => setFeedbackRating(Math.max(1, Math.min(5, Number(e.target.value) || 5)) as 1 | 2 | 3 | 4 | 5)} />
+            <Label>Comments</Label>
+            <Textarea maxLength={500} value={feedbackComment} onChange={(e) => setFeedbackComment(e.target.value)} placeholder="Share your suggestions (max 500 chars)" />
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={feedbackContactOptIn} onChange={(e) => setFeedbackContactOptIn(e.target.checked)} /> Contact me for follow-up</label>
+            <Button onClick={handleFeedbackSubmit}>Submit Feedback</Button>
+          </div>
+        </Card>
+      </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-[1.1fr_0.9fr] gap-6">
         <Card className="p-6">

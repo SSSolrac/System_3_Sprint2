@@ -26,6 +26,7 @@ import {
   type SurveyQuestion,
   type WinBackOfferType,
 } from "../../lib/member-engagement";
+import { loadFeedback } from "../../lib/member-lifecycle";
 
 const tabs = [
   { id: "notifications", label: "Push Notifications", icon: BellRing },
@@ -73,6 +74,8 @@ export default function AdminEngagementPage() {
   useEffect(() => {
     saveEngagementState(state);
   }, [state]);
+
+  const feedbackItems = useMemo(() => loadFeedback(), [state.surveys.length, state.notificationCampaigns.length]);
 
   const inactiveMembers = useMemo(
     () => buildInactiveMemberInsights(members, transactions, loginActivity),
@@ -292,6 +295,31 @@ export default function AdminEngagementPage() {
             <p className="relative mt-2 text-5xl font-bold tracking-tight text-[#10213a]">{inactiveMembers.length}</p>
             <p className="relative mt-3 text-xs leading-5 text-[#a66a40]">Members eligible for reactivation targeting and ROI tracking.</p>
           </Card>
+        </div>
+      </section>
+
+
+
+      <section className="rounded-2xl border border-[#dbe7f3] bg-white p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-[#10213a]">Member Feedback Dashboard</h3>
+            <p className="text-sm text-gray-500">Categories: points, rewards, service, app.</p>
+          </div>
+          <Badge>{feedbackItems.length} total</Badge>
+        </div>
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-4 gap-3">
+          {["points", "rewards", "service", "app"].map((cat) => {
+            const rows = feedbackItems.filter((item) => item.category === cat);
+            const avg = rows.length ? rows.reduce((sum, row) => sum + row.rating, 0) / rows.length : 0;
+            return (
+              <div key={cat} className="rounded-xl border border-gray-200 p-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">{cat}</p>
+                <p className="mt-2 text-xl font-bold text-[#10213a]">{rows.length}</p>
+                <p className="text-xs text-gray-500">Avg rating {avg.toFixed(1) || "0.0"}/5</p>
+              </div>
+            );
+          })}
         </div>
       </section>
 

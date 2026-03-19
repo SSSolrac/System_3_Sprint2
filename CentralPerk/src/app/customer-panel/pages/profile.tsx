@@ -9,6 +9,12 @@ import { Label } from "../../components/ui/label";
 import { Badge } from "../../components/ui/badge";
 import { Progress } from "../../components/ui/progress";
 import { toast } from "sonner";
+import { Switch } from "../../components/ui/switch";
+import {
+  loadCommunicationPreference,
+  saveCommunicationPreference,
+  type CommunicationPreference,
+} from "../../lib/member-lifecycle";
 import { fetchTierRules, loadTierHistory, updateMemberProfile, uploadMemberProfilePhoto } from "../../lib/loyalty-supabase";
 import TierHistory from "../../components/TierHistory";
 
@@ -37,7 +43,7 @@ export default function Profile() {
   const [otpInput, setOtpInput] = useState("");
   const [pendingSave, setPendingSave] = useState(false);
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
-
+  const [preferences, setPreferences] = useState<CommunicationPreference>(() => loadCommunicationPreference(user.memberId));
 
   const [tierMinimums, setTierMinimums] = useState({
     Bronze: 0,
@@ -46,6 +52,7 @@ export default function Profile() {
   });
 
   useEffect(() => {
+    setPreferences(loadCommunicationPreference(user.memberId));
     setFormData({
       fullName: user.fullName,
       email: user.email,
@@ -189,6 +196,12 @@ export default function Profile() {
     }
   };
 
+
+  const savePreferences = () => {
+    saveCommunicationPreference(user.memberId, preferences);
+    toast.success("Communication preferences saved.");
+  };
+
   const tierBenefits: Record<"Bronze" | "Silver" | "Gold", string[]> = {
     Bronze: [
       "Earn 1 point per $1 spent",
@@ -232,6 +245,56 @@ export default function Profile() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
+
+          <Card className="p-6">
+            <h3 className="font-semibold text-gray-900 text-lg">Communication Preferences</h3>
+            <p className="text-sm text-gray-500 mt-1">Control SMS, email, push, and promotional frequency settings.</p>
+            <div className="mt-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="font-medium">SMS notifications</p>
+                  <p className="text-xs text-gray-500">Transactional updates and alerts.</p>
+                </div>
+                <Switch checked={preferences.sms} onCheckedChange={(v) => setPreferences((prev) => ({ ...prev, sms: Boolean(v) }))} />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="font-medium">Email notifications</p>
+                  <p className="text-xs text-gray-500">Statements, confirmations, and updates.</p>
+                </div>
+                <Switch checked={preferences.email} onCheckedChange={(v) => setPreferences((prev) => ({ ...prev, email: Boolean(v) }))} />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="font-medium">Push notifications</p>
+                  <p className="text-xs text-gray-500">In-app and device notifications.</p>
+                </div>
+                <Switch checked={preferences.push} onCheckedChange={(v) => setPreferences((prev) => ({ ...prev, push: Boolean(v) }))} />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="font-medium">Promotional messages</p>
+                  <p className="text-xs text-gray-500">You can opt out; transactional messages remain enabled.</p>
+                </div>
+                <Switch checked={preferences.promotionalOptIn} onCheckedChange={(v) => setPreferences((prev) => ({ ...prev, promotionalOptIn: Boolean(v) }))} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pref-frequency">Promotional frequency</Label>
+                <select
+                  id="pref-frequency"
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  value={preferences.frequency}
+                  onChange={(e) => setPreferences((prev) => ({ ...prev, frequency: e.target.value as CommunicationPreference["frequency"] }))}
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="never">Never</option>
+                </select>
+              </div>
+              <Button onClick={savePreferences} className="bg-[#1A2B47] text-white hover:bg-[#152238]">Save Preferences</Button>
+            </div>
+          </Card>
+
           <Card className="p-6">
             <div className="flex items-center justify-between mb-6">
               <h3 className="font-semibold text-gray-900 text-lg">Personal Information</h3>
