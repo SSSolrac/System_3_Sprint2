@@ -446,10 +446,10 @@ $$;
 -- RLS AND STORAGE POLICIES
 -- ============================================================
 
-alter table public.loyalty_members enable row level security;
-alter table public.member_login_activity enable row level security;
-alter table public.member_reengagement_actions enable row level security;
-alter table public.member_feedback enable row level security;
+alter table public.loyalty_members disable row level security;
+alter table public.member_login_activity disable row level security;
+alter table public.member_reengagement_actions disable row level security;
+alter table public.member_feedback disable row level security;
 
 drop policy if exists loyalty_members_select_own on public.loyalty_members;
 create policy loyalty_members_select_own
