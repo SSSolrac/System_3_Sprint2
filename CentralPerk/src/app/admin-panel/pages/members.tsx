@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAdminData } from "../hooks/use-admin-data";
 import { MemberLookup } from "../../components/member-lookup";
 import { awardMemberPoints } from "../../lib/loyalty-supabase";
@@ -16,12 +16,17 @@ import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
 import {
   buildSegmentStats,
+  createCustomSegment,
+  deleteCustomSegment,
   exportMembersCsv,
+  fetchAllSegments,
+  fetchSegmentAssignments,
+  removeMembersFromSegment,
   saveManualSegment,
-  type MemberSegment,
+  SYSTEM_MEMBER_SEGMENTS,
+  updateCustomSegment,
+  assignMembersToSegment,
 } from "../../lib/member-lifecycle";
-
-const baseSegments: Array<MemberSegment | "Manual"> = ["High Value", "Active", "At Risk", "Inactive", "Manual"];
 
 export default function AdminMembersPage() {
   const { members, loading, error, refetch } = useAdminData();
@@ -33,6 +38,34 @@ export default function AdminMembersPage() {
   const [awardReason, setAwardReason] = useState("");
   const [manualSegmentDraft, setManualSegmentDraft] = useState<Record<string, string>>({});
   const [segmentFilter, setSegmentFilter] = useState<string>("All");
+  const [segments, setSegments] = useState<Array<{ id: string; name: string; description: string | null; is_system: boolean }>>([]);
+  const [memberSegmentMap, setMemberSegmentMap] = useState<Record<string, string[]>>({});
+  const [selectedMemberKeys, setSelectedMemberKeys] = useState<Record<string, boolean>>({});
+  const [segmentName, setSegmentName] = useState("");
+  const [segmentDescription, setSegmentDescription] = useState("");
+  const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
+  const [segmentDialogOpen, setSegmentDialogOpen] = useState(false);
+  const [bulkSegmentId, setBulkSegmentId] = useState<string>("");
+
+  const loadManualSegments = async () => {
+    const [allSegments, assignments] = await Promise.all([fetchAllSegments(), fetchSegmentAssignments()]);
+    setSegments(allSegments);
+    const nextMap: Record<string, string[]> = {};
+    for (const row of assignments as Array<{ member_id?: string | number; member_segments?: { name?: string } }>) {
+      const key = String(row.member_id ?? "");
+      const segmentNameValue = row.member_segments?.name;
+      if (!key || !segmentNameValue) continue;
+      nextMap[key] = nextMap[key] ? [...nextMap[key], segmentNameValue] : [segmentNameValue];
+    }
+    setMemberSegmentMap(nextMap);
+  };
+
+  useEffect(() => {
+    loadManualSegments().catch((err) => {
+      console.error(err);
+      toast.error("Unable to load member segments.");
+    });
+  }, []);
 
   const closeManualAwardDialog = () => {
     setManualAwardMember(null);
@@ -76,15 +109,25 @@ export default function AdminMembersPage() {
   const segmentedMembers = useMemo(() => {
     const byMember = members.map((member) => {
       const effectiveSegment = member.effective_segment || member.auto_segment || "Inactive";
+      const memberKey = String(member.id ?? member.member_id ?? "");
+      const assignedSegments = memberSegmentMap[memberKey] || [];
+      const customSegments = assignedSegments.filter((name) => !SYSTEM_MEMBER_SEGMENTS.includes(name as (typeof SYSTEM_MEMBER_SEGMENTS)[number]));
       return {
         ...member,
         segment: effectiveSegment,
         isManual: Boolean(member.manual_segment),
+        customSegments,
+        allSegments: Array.from(new Set([effectiveSegment, ...customSegments])),
       };
     });
 
     return byMember;
-  }, [members, manualSegmentDraft]);
+  }, [members, memberSegmentMap]);
+
+  const segmentFilterOptions = useMemo(() => {
+    const custom = segments.filter((segment) => !segment.is_system).map((segment) => segment.name);
+    return ["Manual", ...SYSTEM_MEMBER_SEGMENTS, ...custom];
+  }, [segments]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -95,17 +138,25 @@ export default function AdminMembersPage() {
       const email = String(m.email || "").toLowerCase();
       const matchesSearch = !q || memberNumber.includes(q) || phone.includes(q) || email.includes(q) || fullName.includes(q);
       const matchesSegment =
-        segmentFilter === "All" ? true : segmentFilter === "Manual" ? m.isManual : m.segment === segmentFilter;
+        segmentFilter === "All"
+          ? true
+          : segmentFilter === "Manual"
+          ? m.isManual || m.customSegments.length > 0
+          : m.segment === segmentFilter || m.customSegments.includes(segmentFilter);
       return matchesSearch && matchesSegment;
     });
   }, [segmentedMembers, query, segmentFilter]);
 
-  const stats = useMemo(() => buildSegmentStats(segmentedMembers.length, segmentedMembers.map((m) => m.segment)), [segmentedMembers]);
+  const stats = useMemo(
+    () => buildSegmentStats(segmentedMembers.length, segmentedMembers.flatMap((m) => (m.customSegments.length ? m.allSegments : [m.segment]))),
+    [segmentedMembers]
+  );
 
   const handleManualSegmentSave = async (memberNumber: string, memberId: string, value: string) => {
     try {
       const saved = await saveManualSegment(memberNumber, value);
       await refetch();
+      await loadManualSegments();
       setManualSegmentDraft((prev) => ({ ...prev, [memberId]: saved }));
       toast.success("Manual segment saved.");
     } catch (error) {
@@ -113,14 +164,91 @@ export default function AdminMembersPage() {
     }
   };
 
+  const selectedMemberIds = useMemo(
+    () =>
+      filtered
+        .filter((member) => selectedMemberKeys[String(member.member_id ?? member.id ?? member.member_number)])
+        .map((member) => member.member_id ?? member.id),
+    [filtered, selectedMemberKeys]
+  );
+
+  const handleCreateOrUpdateSegment = async () => {
+    try {
+      if (editingSegmentId) {
+        await updateCustomSegment(editingSegmentId, { name: segmentName, description: segmentDescription });
+        toast.success("Segment updated.");
+      } else {
+        await createCustomSegment({ name: segmentName, description: segmentDescription });
+        toast.success("Segment created.");
+      }
+      setSegmentDialogOpen(false);
+      setSegmentName("");
+      setSegmentDescription("");
+      setEditingSegmentId(null);
+      await loadManualSegments();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Unable to save segment.");
+    }
+  };
+
+  const handleDeleteSegment = async (segmentId: string) => {
+    try {
+      await deleteCustomSegment(segmentId);
+      toast.success("Segment deleted.");
+      await loadManualSegments();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Unable to delete segment.");
+    }
+  };
+
+  const handleBulkAssign = async () => {
+    if (!bulkSegmentId) return toast.error("Select a segment.");
+    if (!selectedMemberIds.length) return toast.error("Select at least one member.");
+    try {
+      await assignMembersToSegment(selectedMemberIds, bulkSegmentId);
+      toast.success("Members assigned to segment.");
+      setSelectedMemberKeys({});
+      await loadManualSegments();
+      await refetch();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Unable to assign members.");
+    }
+  };
+
+  const handleRemoveFromSegment = async (memberId: string | number, segmentNameValue: string) => {
+    try {
+      const segment = segments.find((entry) => entry.name === segmentNameValue);
+      if (!segment) return;
+      await removeMembersFromSegment([memberId], segment.id);
+      toast.success(`Removed from ${segmentNameValue}.`);
+      await loadManualSegments();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Unable to remove member from segment.");
+    }
+  };
+
   const handleExport = () => {
+    const exportedSegmentContextForMember = (member: (typeof filtered)[number]) => {
+      if (segmentFilter === "All") return "All segments";
+      if (segmentFilter === "Manual") {
+        const manualContexts = [];
+        if (member.isManual) manualContexts.push(`System Manual: ${member.segment}`);
+        if (member.customSegments.length) manualContexts.push(`Custom: ${member.customSegments.join(" | ")}`);
+        return manualContexts.length ? manualContexts.join(" ; ") : "Manual";
+      }
+      if (member.customSegments.includes(segmentFilter)) return segmentFilter;
+      return member.segment;
+    };
+
     exportMembersCsv(
       filtered.map((m) => ({
         memberNumber: m.member_number,
         name: `${m.first_name} ${m.last_name}`,
         email: m.email,
         phone: m.phone || "",
-        segment: m.segment,
+        effectiveSegment: m.segment,
+        customSegments: m.customSegments,
+        exportedSegmentContext: exportedSegmentContextForMember(m),
       }))
     );
     toast.success("Segment list exported.");
@@ -157,12 +285,90 @@ export default function AdminMembersPage() {
             onChange={(e) => setSegmentFilter(e.target.value)}
           >
             <option value="All">All segments</option>
-            {baseSegments.map((segment) => (
+            {segmentFilterOptions.map((segment) => (
               <option key={segment} value={segment}>{segment}</option>
             ))}
           </select>
         </div>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => {
+            setEditingSegmentId(null);
+            setSegmentName("");
+            setSegmentDescription("");
+            setSegmentDialogOpen(true);
+          }}
+        >
+          Create Segment
+        </Button>
         <Button onClick={handleExport} className="bg-[#1A2B47] text-white hover:bg-[#152238]">Export Segment List</Button>
+      </div>
+
+      <Dialog open={segmentDialogOpen} onOpenChange={setSegmentDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{editingSegmentId ? "Edit Custom Segment" : "Create Custom Segment"}</DialogTitle>
+            <DialogDescription>Define a custom member segment for manual assignment.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <Label htmlFor="segment-name">Segment name</Label>
+              <Input id="segment-name" value={segmentName} onChange={(e) => setSegmentName(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="segment-description">Description</Label>
+              <Input id="segment-description" value={segmentDescription} onChange={(e) => setSegmentDescription(e.target.value)} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSegmentDialogOpen(false)}>Cancel</Button>
+            <Button onClick={handleCreateOrUpdateSegment}>{editingSegmentId ? "Save Changes" : "Create Segment"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <div className="bg-white rounded-xl p-6 border border-[#9ed8ff] space-y-3">
+        <h2 className="text-lg font-semibold text-gray-900">Custom Segments</h2>
+        <div className="grid grid-cols-1 gap-2">
+          {segments.filter((segment) => !segment.is_system).map((segment) => (
+            <div key={segment.id} className="rounded-md border border-gray-200 p-3 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold text-gray-900">{segment.name}</p>
+                <p className="text-xs text-gray-500">{segment.description || "No description"}</p>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setEditingSegmentId(segment.id);
+                    setSegmentName(segment.name);
+                    setSegmentDescription(segment.description || "");
+                    setSegmentDialogOpen(true);
+                  }}
+                >
+                  Edit
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => handleDeleteSegment(segment.id)}>Delete</Button>
+              </div>
+            </div>
+          ))}
+          {segments.filter((segment) => !segment.is_system).length === 0 ? <p className="text-sm text-gray-500">No custom segments yet.</p> : null}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl p-4 border border-[#9ed8ff] flex flex-wrap gap-3 items-end">
+        <div>
+          <Label htmlFor="bulk-segment">Assign selected to segment</Label>
+          <select id="bulk-segment" className="mt-1 rounded-md border border-gray-300 px-3 py-2 text-sm" value={bulkSegmentId} onChange={(e) => setBulkSegmentId(e.target.value)}>
+            <option value="">Select segment</option>
+            {segments.map((segment) => (
+              <option key={segment.id} value={segment.id}>{segment.name}</option>
+            ))}
+          </select>
+        </div>
+        <Button onClick={handleBulkAssign}>Assign Members</Button>
       </div>
 
       {selectedMember ? (
@@ -221,6 +427,7 @@ export default function AdminMembersPage() {
             <thead>
               <tr className="border-b-2 border-gray-200">
                 <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Member #</th>
+                <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Select</th>
                 <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Name</th>
                 <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Email</th>
                 <th className="text-left py-3 px-4 text-sm font-semibold text-gray-600">Mobile</th>
@@ -236,6 +443,18 @@ export default function AdminMembersPage() {
                 return (
                   <tr key={key} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
                     <td className="py-4 px-4 text-sm font-medium text-gray-800">{member.member_number}</td>
+                    <td className="py-4 px-4 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(selectedMemberKeys[String(member.member_id ?? member.id ?? member.member_number)])}
+                        onChange={(e) =>
+                          setSelectedMemberKeys((prev) => ({
+                            ...prev,
+                            [String(member.member_id ?? member.id ?? member.member_number)]: e.target.checked,
+                          }))
+                        }
+                      />
+                    </td>
                     <td className="py-4 px-4 text-sm text-gray-700">{member.first_name} {member.last_name}</td>
                     <td className="py-4 px-4 text-sm text-gray-600">{member.email}</td>
                     <td className="py-4 px-4 text-sm text-gray-600">{member.phone || "-"}</td>
@@ -257,6 +476,20 @@ export default function AdminMembersPage() {
                           Save
                         </Button>
                       </div>
+                      {member.customSegments.length ? (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {member.customSegments.map((segment) => (
+                            <button
+                              key={`${key}-${segment}`}
+                              type="button"
+                              onClick={() => handleRemoveFromSegment(member.member_id ?? member.id ?? member.member_number, segment)}
+                              className="rounded-full border border-gray-300 px-2 py-0.5 text-[10px] text-gray-700 hover:bg-gray-100"
+                            >
+                              {segment} ×
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="py-4 px-4">
                       <div className="flex gap-2">

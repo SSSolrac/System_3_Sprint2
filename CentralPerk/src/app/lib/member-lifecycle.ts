@@ -7,9 +7,19 @@ const STORAGE_KEYS = {
 } as const;
 
 export type MemberSegment = "High Value" | "Active" | "At Risk" | "Inactive";
+export const SYSTEM_MEMBER_SEGMENTS: MemberSegment[] = ["High Value", "Active", "At Risk", "Inactive"];
+
+export interface ManualSegment {
+  id: string;
+  name: string;
+  description: string | null;
+  is_system: boolean;
+  created_at: string;
+  updated_at: string;
+}
 
 export interface SegmentStats {
-  segment: MemberSegment;
+  segment: string;
   count: number;
   share: number;
 }
@@ -59,25 +69,146 @@ function normalizeManualSegment(value: string): MemberSegment | null {
   return null;
 }
 
+function validateSegmentName(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error("Segment name is required.");
+  if (trimmed.length > 80) throw new Error("Segment name must be 80 characters or fewer.");
+  return trimmed;
+}
+
+export async function createCustomSegment(input: { name: string; description?: string }) {
+  const name = validateSegmentName(input.name);
+  const description = input.description?.trim() || null;
+
+  const result = await supabase
+    .from("member_segments")
+    .insert({ name, description, is_system: false })
+    .select("id,name,description,is_system,created_at,updated_at")
+    .single();
+
+  if (result.error) throw result.error;
+  return result.data as ManualSegment;
+}
+
+export async function updateCustomSegment(segmentId: string, input: { name: string; description?: string }) {
+  const name = validateSegmentName(input.name);
+  const description = input.description?.trim() || null;
+
+  const result = await supabase
+    .from("member_segments")
+    .update({ name, description, updated_at: new Date().toISOString() })
+    .eq("id", segmentId)
+    .eq("is_system", false)
+    .select("id,name,description,is_system,created_at,updated_at")
+    .single();
+
+  if (result.error) throw result.error;
+  return result.data as ManualSegment;
+}
+
+export async function deleteCustomSegment(segmentId: string) {
+  const lookup = await supabase
+    .from("member_segments")
+    .select("id,is_system")
+    .eq("id", segmentId)
+    .maybeSingle();
+  if (lookup.error) throw lookup.error;
+  if (!lookup.data) throw new Error("Segment not found.");
+  if (lookup.data.is_system) throw new Error("System segments cannot be deleted.");
+
+  const result = await supabase.from("member_segments").delete().eq("id", segmentId);
+  if (result.error) throw result.error;
+}
+
+export async function assignMembersToSegment(memberIds: Array<string | number>, segmentId: string) {
+  if (!memberIds.length) return;
+  const rows = memberIds.map((memberId) => ({ member_id: Number(memberId), segment_id: segmentId }));
+  const result = await supabase.from("member_segment_assignments").upsert(rows, { onConflict: "member_id,segment_id" });
+  if (result.error) throw result.error;
+}
+
+export async function removeMembersFromSegment(memberIds: Array<string | number>, segmentId: string) {
+  if (!memberIds.length) return;
+  const normalizedMemberIds = memberIds.map((id) => Number(id));
+  const result = await supabase
+    .from("member_segment_assignments")
+    .delete()
+    .eq("segment_id", segmentId)
+    .in("member_id", normalizedMemberIds);
+  if (result.error) throw result.error;
+}
+
+export async function fetchAllSegments() {
+  const result = await supabase
+    .from("member_segments")
+    .select("id,name,description,is_system,created_at,updated_at")
+    .order("is_system", { ascending: false })
+    .order("name", { ascending: true });
+  if (result.error) throw result.error;
+  return (result.data || []) as ManualSegment[];
+}
+
+export async function fetchMembersInSegment(segmentId: string) {
+  const result = await supabase
+    .from("member_segment_assignments")
+    .select("assigned_at,member_id,loyalty_members!inner(id,member_number,first_name,last_name,email,phone,points_balance,tier)")
+    .eq("segment_id", segmentId)
+    .order("assigned_at", { ascending: false });
+  if (result.error) throw result.error;
+  return result.data || [];
+}
+
+export async function fetchSegmentAssignments() {
+  const result = await supabase
+    .from("member_segment_assignments")
+    .select("member_id,segment_id,member_segments!inner(id,name,is_system)");
+  if (result.error) throw result.error;
+  return result.data || [];
+}
+
 export async function saveManualSegment(memberNumber: string, segmentName: string) {
   const normalized = normalizeManualSegment(segmentName);
   if (!normalized) throw new Error("Manual segment must be one of: High Value, Active, At Risk, Inactive.");
 
-  const result = await supabase
+  const memberLookup = await supabase
     .from("loyalty_members")
-    .update({ manual_segment: normalized })
+    .select("id,member_number")
     .eq("member_number", memberNumber)
-    .select("member_number")
     .limit(1)
     .maybeSingle();
-  if (result.error) throw result.error;
-  if (!result.data) throw new Error("Member not found for manual segment update.");
+  if (memberLookup.error) throw memberLookup.error;
+  if (!memberLookup.data) throw new Error("Member not found for manual segment update.");
+
+  const segmentLookup = await supabase
+    .from("member_segments")
+    .select("id,name")
+    .eq("name", normalized)
+    .eq("is_system", true)
+    .limit(1)
+    .maybeSingle();
+  if (segmentLookup.error) throw segmentLookup.error;
+  if (!segmentLookup.data) throw new Error("System segment not found.");
+
+  await assignMembersToSegment([memberLookup.data.id], segmentLookup.data.id);
+  const update = await supabase
+    .from("loyalty_members")
+    .update({ manual_segment: normalized })
+    .eq("id", memberLookup.data.id);
+  if (update.error) throw update.error;
 
   return normalized;
 }
 
-export function exportMembersCsv(rows: Array<{ memberNumber: string; name: string; email: string; phone: string; segment: string }>) {
-  const headers = ["Member #", "Name", "Email", "Phone", "Segment"];
+export function exportMembersCsv(rows: Array<{
+  memberNumber: string;
+  name: string;
+  email: string;
+  phone: string;
+  effectiveSegment: string;
+  customSegments: string[];
+  exportedSegmentContext: string;
+}>) {
+  const headers = ["Member #", "Name", "Email", "Phone", "Effective Segment", "Custom Segments", "Exported Segment Context"];
   const lines = [headers.join(",")];
   for (const row of rows) {
     lines.push([
@@ -85,7 +216,9 @@ export function exportMembersCsv(rows: Array<{ memberNumber: string; name: strin
       row.name,
       row.email,
       row.phone,
-      row.segment,
+      row.effectiveSegment,
+      row.customSegments.join(" | "),
+      row.exportedSegmentContext,
     ].map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","));
   }
 
@@ -101,7 +234,7 @@ export function exportMembersCsv(rows: Array<{ memberNumber: string; name: strin
 }
 
 export function buildSegmentStats(totalMembers: number, segments: string[]): SegmentStats[] {
-  const base: Record<MemberSegment, number> = {
+  const base: Record<string, number> = {
     "High Value": 0,
     Active: 0,
     "At Risk": 0,
@@ -109,14 +242,16 @@ export function buildSegmentStats(totalMembers: number, segments: string[]): Seg
   };
 
   for (const segment of segments) {
-    if (segment in base) base[segment as MemberSegment] += 1;
+    const key = String(segment || "").trim();
+    if (!key) continue;
+    base[key] = (base[key] || 0) + 1;
   }
 
-  return (Object.keys(base) as MemberSegment[]).map((segment) => ({
+  return Object.keys(base).map((segment) => ({
     segment,
     count: base[segment],
     share: totalMembers > 0 ? (base[segment] / totalMembers) * 100 : 0,
-  }));
+  })).sort((a, b) => b.count - a.count || a.segment.localeCompare(b.segment));
 }
 
 export const defaultCommunicationPreference: CommunicationPreference = {
