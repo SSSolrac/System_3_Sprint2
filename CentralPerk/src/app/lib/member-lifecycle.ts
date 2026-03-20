@@ -199,8 +199,16 @@ export async function saveManualSegment(memberNumber: string, segmentName: strin
   return normalized;
 }
 
-export function exportMembersCsv(rows: Array<{ memberNumber: string; name: string; email: string; phone: string; segment: string }>) {
-  const headers = ["Member #", "Name", "Email", "Phone", "Segment"];
+export function exportMembersCsv(rows: Array<{
+  memberNumber: string;
+  name: string;
+  email: string;
+  phone: string;
+  effectiveSegment: string;
+  customSegments: string[];
+  exportedSegmentContext: string;
+}>) {
+  const headers = ["Member #", "Name", "Email", "Phone", "Effective Segment", "Custom Segments", "Exported Segment Context"];
   const lines = [headers.join(",")];
   for (const row of rows) {
     lines.push([
@@ -208,7 +216,9 @@ export function exportMembersCsv(rows: Array<{ memberNumber: string; name: strin
       row.name,
       row.email,
       row.phone,
-      row.segment,
+      row.effectiveSegment,
+      row.customSegments.join(" | "),
+      row.exportedSegmentContext,
     ].map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","));
   }
 

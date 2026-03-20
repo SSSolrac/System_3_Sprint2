@@ -228,13 +228,27 @@ export default function AdminMembersPage() {
   };
 
   const handleExport = () => {
+    const exportedSegmentContextForMember = (member: (typeof filtered)[number]) => {
+      if (segmentFilter === "All") return "All segments";
+      if (segmentFilter === "Manual") {
+        const manualContexts = [];
+        if (member.isManual) manualContexts.push(`System Manual: ${member.segment}`);
+        if (member.customSegments.length) manualContexts.push(`Custom: ${member.customSegments.join(" | ")}`);
+        return manualContexts.length ? manualContexts.join(" ; ") : "Manual";
+      }
+      if (member.customSegments.includes(segmentFilter)) return segmentFilter;
+      return member.segment;
+    };
+
     exportMembersCsv(
       filtered.map((m) => ({
         memberNumber: m.member_number,
         name: `${m.first_name} ${m.last_name}`,
         email: m.email,
         phone: m.phone || "",
-        segment: m.segment,
+        effectiveSegment: m.segment,
+        customSegments: m.customSegments,
+        exportedSegmentContext: exportedSegmentContextForMember(m),
       }))
     );
     toast.success("Segment list exported.");
