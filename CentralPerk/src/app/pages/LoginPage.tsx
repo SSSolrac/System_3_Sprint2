@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { supabase } from '../../utils/supabase/client';
 import { clearStoredAuth, getRoleFromSession } from '../auth/auth';
 import { trackMemberLoginActivity } from '../lib/loyalty-supabase';
+import { AUTH_REQUIRE_EMAIL_CONFIRMATION_HINT } from '../auth/auth-config';
 
 export function LoginPage() {
   const [email, setEmail] = useState('');
@@ -11,6 +12,21 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [loginRole, setLoginRole] = useState<'customer' | 'admin'>('admin');
   const navigate = useNavigate();
+  const normalizeEmail = (rawEmail: string) => rawEmail.trim().toLowerCase();
+
+  const profileExistsForEmail = async (normalizedEmail: string) => {
+    const { data, error: profileLookupError } = await supabase
+      .from('loyalty_members')
+      .select('id')
+      .ilike('email', normalizedEmail)
+      .limit(1);
+
+    if (profileLookupError) {
+      return false;
+    }
+
+    return Boolean(data?.length);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -19,9 +35,11 @@ export function LoginPage() {
     setError(null);
 
     try {
+      const normalizedCustomerEmail = normalizeEmail(email);
+      const normalizedAdminId = email.trim();
       const authEmail = loginRole === 'admin'
-        ? `${email}@admin.loyaltyhub.com`
-        : email;
+        ? `${normalizedAdminId}@admin.loyaltyhub.com`
+        : normalizedCustomerEmail;
 
       const { data, error: signInError } = await supabase.auth.signInWithPassword({
         email: authEmail,
@@ -29,16 +47,32 @@ export function LoginPage() {
       });
 
       if (signInError) {
-        if (signInError.message.includes('Invalid login credentials')) {
+        const signInCode = String(signInError.code ?? '').toLowerCase();
+        const signInMessage = signInError.message.toLowerCase();
+        const isEmailNotConfirmedError =
+          signInCode === 'email_not_confirmed' || signInMessage.includes('email not confirmed');
+        const isInvalidCredentialsError = signInMessage.includes('invalid login credentials');
+        const isRateLimited = signInMessage.includes('rate limit') || signInMessage.includes('over_');
+
+        if (isEmailNotConfirmedError) {
+          setError(
+            AUTH_REQUIRE_EMAIL_CONFIRMATION_HINT
+              ? 'Email confirmation is still required for this account. Confirm your email, then try signing in again.'
+              : 'Email confirmation is still required for this account. Please check your email and confirm the account before signing in.'
+          );
+        } else if (isInvalidCredentialsError) {
           if (loginRole === 'admin') {
             setError('Invalid Admin ID or password. Please check your credentials and try again. Admin accounts must be created in Supabase with the email format: ADMINID@admin.loyaltyhub.com');
           } else {
-            setError('Invalid email or password. Please check your credentials and try again.');
+            const hasMatchingProfile = await profileExistsForEmail(normalizedCustomerEmail);
+            setError(
+              hasMatchingProfile
+                ? 'We found your loyalty profile, but this sign-in failed. Your account may still need email confirmation, or this email already existed with a different password. Try confirming your email or resetting your password.'
+                : 'Invalid email or password. Please check your credentials and try again.'
+            );
           }
-        } else if (signInError.message.toLowerCase().includes('rate limit') || signInError.message.includes('over_')) {
+        } else if (isRateLimited) {
           setError('Too many login attempts right now. Please wait a minute and try again.');
-        } else if (signInError.message.includes('Email not confirmed')) {
-          setError('This account still requires email confirmation in Auth settings. Please contact support.');
         } else {
           throw signInError;
         }
