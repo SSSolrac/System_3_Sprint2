@@ -2,6 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../../utils/supabase/client';
 import { ensureWelcomePackage } from '../lib/loyalty-supabase';
 import { applyReferralCodeForSignup } from '../lib/member-lifecycle';
+import {
+  AUTH_REQUIRE_EMAIL_CONFIRMATION_HINT,
+  EMAIL_CONFIRMATION_REQUIRED_MESSAGE,
+  EXISTING_ACCOUNT_RECOVERY_MESSAGE,
+} from '../auth/auth-config';
 
 const RATE_LIMIT_COOLDOWN_MS = 60_000;
 const REGISTRATION_COOLDOWN_STORAGE_KEY = 'centralperk-registration-cooldown-until-ms';
@@ -139,6 +144,8 @@ export function RegistrationCard() {
     if (!digitsOnly) return '';
     return trimmed.startsWith('+') ? `+${digitsOnly}` : digitsOnly;
   };
+
+  const normalizeEmail = (rawEmail: string) => rawEmail.trim().toLowerCase();
 
   const isAlreadyExistsAuthError = (rawError: unknown) => {
     if (!rawError || typeof rawError !== 'object') return false;
@@ -292,7 +299,7 @@ export function RegistrationCard() {
     let normalizedEmail = '';
 
     try {
-      normalizedEmail = formData.email.trim().toLowerCase();
+      normalizedEmail = normalizeEmail(formData.email);
       const normalizedPhone = normalizePhoneNumber(formData.phone);
       // Pre-check email and phone before auth signup to prevent duplicate registrations.
       const { data: existingMembers, error: existingMembersError } = await supabase
@@ -352,17 +359,19 @@ export function RegistrationCard() {
       });
       memberProfileCreatedOrRepaired = true;
 
-      const shouldConfirmEmail = authUserAlreadyExisted ? false : !signUpData?.session;
-      const successSuffix = shouldConfirmEmail
-        ? 'Please check your email to confirm your account before logging in.'
-        : 'You can now log in.';
-      let successMessage = `Registration successful! Welcome to our loyalty program. ${successSuffix}`;
+      const emailConfirmationRequired = !authUserAlreadyExisted && !signUpData?.session;
+      const immediateLoginAvailable = !authUserAlreadyExisted && Boolean(signUpData?.session);
+      let successMessage = emailConfirmationRequired
+        ? EMAIL_CONFIRMATION_REQUIRED_MESSAGE
+        : immediateLoginAvailable
+          ? 'Registration complete. You can now log in.'
+          : 'Registration completed.';
 
       const welcomeResult = await ensureWelcomePackage(memberRecord.member_number, memberRecord.email);
       const memberPointsBalance = Number(welcomeResult.newBalance ?? memberRecord.points_balance ?? 0);
 
-      if (welcomeResult.granted) {
-        successMessage = `Registration successful! Welcome package applied. ${successSuffix}`;
+      if (welcomeResult.granted && immediateLoginAvailable) {
+        successMessage = 'Registration complete. Welcome package applied. You can now log in.';
       }
 
       if (formData.referralCode.trim()) {
@@ -380,8 +389,9 @@ export function RegistrationCard() {
         successMessage = `${successMessage} We also repaired an incomplete member profile from an earlier signup attempt.`;
       }
       if (authUserAlreadyExisted) {
-        successMessage =
-          'Your account already existed, and we completed your member profile setup. Please sign in with your existing account credentials.';
+        successMessage = `${EXISTING_ACCOUNT_RECOVERY_MESSAGE} We completed your member profile setup.`;
+      } else if (emailConfirmationRequired && AUTH_REQUIRE_EMAIL_CONFIRMATION_HINT) {
+        successMessage = `${EMAIL_CONFIRMATION_REQUIRED_MESSAGE} Check your inbox for the confirmation link, then sign in.`;
       }
 
       // Update state with new member data
