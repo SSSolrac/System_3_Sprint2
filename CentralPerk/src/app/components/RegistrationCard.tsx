@@ -23,6 +23,20 @@ const AUTH_ALREADY_EXISTS_HINTS = ['user already registered', 'already registere
 const PROFILE_CONSTRAINT_HINTS = ['duplicate key', 'already exists', 'violates unique constraint'];
 const PARTIAL_SUCCESS_NOTICE =
   'Your account may already have been created. Please check your email for a confirmation link, or try signing in after confirming your email.';
+const MEMBER_SELECT_COLUMNS = 'id,member_id,member_number,first_name,last_name,email,phone,birthdate,points_balance,enrollment_date';
+
+interface MemberProfileInput {
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  birthdate: string;
+}
+
+interface MemberProfileResult {
+  memberRecord: Record<string, any>;
+  recoveredFromExistingAuthSignup: boolean;
+}
 
 export function RegistrationCard() {
   const [formData, setFormData] = useState({
@@ -115,6 +129,81 @@ export function RegistrationCard() {
 
   const hasAnyHint = (haystack: string, hints: string[]) =>
     hints.some((hint) => haystack.toLowerCase().includes(hint));
+
+  const createOrRepairMemberProfile = async (input: MemberProfileInput): Promise<MemberProfileResult> => {
+    const { data: insertedMember, error: insertError } = await supabase
+      .from('loyalty_members')
+      .insert([
+        {
+          first_name: input.firstName,
+          last_name: input.lastName,
+          email: input.email,
+          phone: input.phone,
+          birthdate: input.birthdate,
+          points_balance: 0,
+          tier: 'Bronze',
+        },
+      ])
+      .select(MEMBER_SELECT_COLUMNS)
+      .single();
+
+    if (!insertError && insertedMember) {
+      return {
+        memberRecord: insertedMember,
+        recoveredFromExistingAuthSignup: false,
+      };
+    }
+
+    const insertErrorText = extractErrorText(insertError).toLowerCase();
+    if (!hasAnyHint(insertErrorText, PROFILE_CONSTRAINT_HINTS)) {
+      throw new Error('PROFILE_CREATION_FAILED');
+    }
+
+    const { data: existingMember, error: existingMemberError } = await supabase
+      .from('loyalty_members')
+      .select(MEMBER_SELECT_COLUMNS)
+      .or(`email.ilike.${input.email},phone.eq.${input.phone}`)
+      .limit(1)
+      .maybeSingle();
+
+    if (existingMemberError || !existingMember) {
+      throw new Error('PROFILE_CREATION_FAILED');
+    }
+
+    const needsRepair =
+      !existingMember.first_name ||
+      !existingMember.last_name ||
+      !existingMember.phone ||
+      !existingMember.birthdate;
+
+    if (!needsRepair) {
+      return {
+        memberRecord: existingMember,
+        recoveredFromExistingAuthSignup: false,
+      };
+    }
+
+    const { data: repairedMember, error: repairError } = await supabase
+      .from('loyalty_members')
+      .update({
+        first_name: existingMember.first_name || input.firstName,
+        last_name: existingMember.last_name || input.lastName,
+        phone: existingMember.phone || input.phone,
+        birthdate: existingMember.birthdate || input.birthdate,
+      })
+      .eq('id', existingMember.id)
+      .select(MEMBER_SELECT_COLUMNS)
+      .single();
+
+    if (repairError || !repairedMember) {
+      throw new Error('PROFILE_CREATION_FAILED');
+    }
+
+    return {
+      memberRecord: repairedMember,
+      recoveredFromExistingAuthSignup: true,
+    };
+  };
 
   const isRateLimitError = (rawError: unknown) => {
     if (!rawError || typeof rawError !== 'object') return false;
@@ -228,34 +317,13 @@ export function RegistrationCard() {
       }
       authSignupLikelyCompleted = true;
 
-      // Insert member profile after auth signup (or profile-recovery flow).
-      const { data: newMember, error: insertError } = await supabase
-        .from('loyalty_members')
-        .insert([
-          {
-            first_name: formData.firstName,
-            last_name: formData.lastName,
-            email: normalizedEmail,
-            phone: normalizedPhone,
-            birthdate: formData.birthdate,
-            points_balance: 0,
-            tier: 'Bronze',
-          },
-        ])
-        .select()
-        .single();
-
-      if (insertError) {
-        const insertErrorText = extractErrorText(insertError).toLowerCase();
-        if (hasAnyHint(insertErrorText, PROFILE_CONSTRAINT_HINTS)) {
-          throw new Error('A user with that email and phone number already exists.');
-        }
-        throw new Error('PROFILE_CREATION_FAILED');
-      }
-
-      if (!newMember) {
-        throw new Error('PROFILE_CREATION_FAILED');
-      }
+      const { memberRecord, recoveredFromExistingAuthSignup } = await createOrRepairMemberProfile({
+        firstName: formData.firstName,
+        lastName: formData.lastName,
+        email: normalizedEmail,
+        phone: normalizedPhone,
+        birthdate: formData.birthdate,
+      });
 
       const shouldConfirmEmail = !signUpData.session;
       const successSuffix = shouldConfirmEmail
@@ -263,8 +331,8 @@ export function RegistrationCard() {
         : 'You can now log in.';
       let successMessage = `Registration successful! Welcome to our loyalty program. ${successSuffix}`;
 
-      const welcomeResult = await ensureWelcomePackage(newMember.member_number, newMember.email);
-      const memberPointsBalance = Number(welcomeResult.newBalance ?? newMember.points_balance ?? 0);
+      const welcomeResult = await ensureWelcomePackage(memberRecord.member_number, memberRecord.email);
+      const memberPointsBalance = Number(welcomeResult.newBalance ?? memberRecord.points_balance ?? 0);
 
       if (welcomeResult.granted) {
         successMessage = `Registration successful! Welcome package applied. ${successSuffix}`;
@@ -273,25 +341,29 @@ export function RegistrationCard() {
       if (formData.referralCode.trim()) {
         const referral = await applyReferralCodeForSignup({
           referralCode: formData.referralCode.trim(),
-          refereeMemberId: String(newMember.member_number),
-          refereeEmail: String(newMember.email),
+          refereeMemberId: String(memberRecord.member_number),
+          refereeEmail: String(memberRecord.email),
         });
         if (!referral.applied) {
           successMessage = `${successMessage} Note: your referral code was invalid or not applicable.`;
         }
       }
 
+      if (recoveredFromExistingAuthSignup) {
+        successMessage = `${successMessage} We also repaired an incomplete member profile from an earlier signup attempt.`;
+      }
+
       // Update state with new member data
       setRegisteredMember({
-        id: String(newMember.id ?? newMember.member_id ?? ''),
-        memberNumber: newMember.member_number,
-        firstName: newMember.first_name,
-        lastName: newMember.last_name,
-        email: newMember.email,
-        phone: newMember.phone,
+        id: String(memberRecord.id ?? memberRecord.member_id ?? ''),
+        memberNumber: memberRecord.member_number,
+        firstName: memberRecord.first_name,
+        lastName: memberRecord.last_name,
+        email: memberRecord.email,
+        phone: memberRecord.phone,
         birthdate: formData.birthdate,
         currentPointsBalance: memberPointsBalance,
-        createdAt: newMember.enrollment_date,
+        createdAt: memberRecord.enrollment_date,
       });
 
       // Reset form
@@ -310,7 +382,7 @@ export function RegistrationCard() {
         text: successMessage,
       });
 
-      console.log('Member registered:', newMember);
+      console.log('Member registered:', memberRecord);
     } catch (error) {
       console.error('Registration error:', error);
 
