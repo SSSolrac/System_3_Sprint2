@@ -9,9 +9,10 @@ export interface Member {
   enrollment_date: string;
   points_balance?: number;
   tier?: string;
-  manual_segment?: "High Value" | "Active" | "At Risk" | "Inactive" | null;
-  auto_segment?: "High Value" | "Active" | "At Risk" | "Inactive" | null;
-  effective_segment?: "High Value" | "Active" | "At Risk" | "Inactive" | null;
+  manual_segment?: string | null;
+  auto_segment?: string | null;
+  effective_segment?: string | null;
+  custom_segments?: string[];
   last_activity_at?: string | null;
   sms_enabled?: boolean;
   email_enabled?: boolean;
