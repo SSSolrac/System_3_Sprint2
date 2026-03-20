@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../../utils/supabase/client';
 import { ensureWelcomePackage } from '../lib/loyalty-supabase';
 import { applyReferralCodeForSignup } from '../lib/member-lifecycle';
 
 const WELCOME_NOTICE_STORAGE_KEY = 'centralperk-welcome-notice';
+const RATE_LIMIT_COOLDOWN_MS = 60_000;
 
 interface Member {
   id: string;
@@ -17,7 +18,6 @@ interface Member {
   createdAt: string;
 }
 
-const AUTH_USER_EXISTS_HINTS = ['user already registered', 'already exists'];
 const AUTH_RATE_LIMIT_HINTS = ['over_email_send_rate_limit', 'rate limit', 'too many requests'];
 const PROFILE_CONSTRAINT_HINTS = ['duplicate key', 'already exists', 'violates unique constraint'];
 
@@ -32,8 +32,24 @@ export function RegistrationCard() {
     referralCode: typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("ref") || "" : "",
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submitLockRef = useRef(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [registeredMember, setRegisteredMember] = useState<Member | null>(null);
+  const [cooldownUntilMs, setCooldownUntilMs] = useState<number | null>(null);
+  const [currentTimeMs, setCurrentTimeMs] = useState(() => Date.now());
+
+  const cooldownSecondsRemaining = cooldownUntilMs
+    ? Math.max(0, Math.ceil((cooldownUntilMs - currentTimeMs) / 1000))
+    : 0;
+  const isCooldownActive = cooldownSecondsRemaining > 0;
+
+  useEffect(() => {
+    if (!isCooldownActive) return;
+    const intervalId = window.setInterval(() => {
+      setCurrentTimeMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [isCooldownActive]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setFormData({
@@ -76,11 +92,19 @@ export function RegistrationCard() {
   const hasAnyHint = (haystack: string, hints: string[]) =>
     hints.some((hint) => haystack.toLowerCase().includes(hint));
 
+  const isRateLimitError = (rawError: unknown) => {
+    if (!rawError || typeof rawError !== 'object') return false;
+    const status = 'status' in rawError ? Number(rawError.status) : NaN;
+    const code = 'code' in rawError ? String(rawError.code ?? '').toLowerCase() : '';
+    const text = extractErrorText(rawError).toLowerCase();
+    return status === 429 || code.includes('over_email_send_rate_limit') || hasAnyHint(text, AUTH_RATE_LIMIT_HINTS);
+  };
+
   const buildReadableErrorMessage = (rawError: unknown) => {
     const errorText = extractErrorText(rawError);
     const normalizedErrorText = errorText.toLowerCase();
 
-    if (hasAnyHint(normalizedErrorText, AUTH_RATE_LIMIT_HINTS)) {
+    if (isRateLimitError(rawError) || hasAnyHint(normalizedErrorText, AUTH_RATE_LIMIT_HINTS)) {
       return 'Too many registration attempts right now. Please wait a minute before trying again.';
     }
 
@@ -118,7 +142,15 @@ export function RegistrationCard() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return;
+    if (submitLockRef.current || isSubmitting) return;
+    if (isCooldownActive) {
+      setMessage({
+        type: 'error',
+        text: `Too many registration attempts right now. Please wait ${cooldownSecondsRemaining} seconds and try again.`,
+      });
+      return;
+    }
+    submitLockRef.current = true;
     setIsSubmitting(true);
     setMessage(null);
     setRegisteredMember(null);
@@ -126,8 +158,6 @@ export function RegistrationCard() {
     try {
       const normalizedEmail = formData.email.trim().toLowerCase();
       const normalizedPhone = formData.phone.trim();
-      let authAlreadyExists = false;
-
       // Pre-check email and phone before auth signup to prevent duplicate registrations.
       const { data: existingMembers, error: existingMembersError } = await supabase
         .from('loyalty_members')
@@ -151,7 +181,7 @@ export function RegistrationCard() {
       }
 
       // Create auth user after pre-check succeeds.
-      const { error: signUpError } = await supabase.auth.signUp({
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email: normalizedEmail,
         password: formData.password,
         options: {
@@ -164,14 +194,10 @@ export function RegistrationCard() {
       });
 
       if (signUpError) {
-        const signUpErrorText = extractErrorText(signUpError).toLowerCase();
-        if (hasAnyHint(signUpErrorText, AUTH_USER_EXISTS_HINTS)) {
-          authAlreadyExists = true;
-        } else if (hasAnyHint(signUpErrorText, AUTH_RATE_LIMIT_HINTS)) {
-          throw new Error('over_email_send_rate_limit');
-        } else {
-          throw signUpError;
+        if (isRateLimitError(signUpError)) {
+          setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
         }
+        throw signUpError;
       }
 
       // Insert member profile after auth signup (or profile-recovery flow).
@@ -203,28 +229,17 @@ export function RegistrationCard() {
         throw new Error('PROFILE_CREATION_FAILED');
       }
 
-      if (authAlreadyExists) {
-        setMessage({
-          type: 'success',
-          text: 'Existing account recovered and profile setup is now complete. You can now log in.',
-        });
-      } else {
-        setMessage({
-          type: 'success',
-          text: 'Registration successful! Welcome to our loyalty program. You can now log in.',
-        });
-      }
+      const shouldConfirmEmail = !signUpData.session;
+      const successSuffix = shouldConfirmEmail
+        ? 'Please check your email to confirm your account before logging in.'
+        : 'You can now log in.';
+      let successMessage = `Registration successful! Welcome to our loyalty program. ${successSuffix}`;
 
       const welcomeResult = await ensureWelcomePackage(newMember.member_number, newMember.email);
       const memberPointsBalance = Number(welcomeResult.newBalance ?? newMember.points_balance ?? 0);
 
       if (welcomeResult.granted) {
-        setMessage({
-          type: 'success',
-          text: authAlreadyExists
-            ? 'Existing account recovered and welcome package applied. You can now log in.'
-            : 'Registration successful! Welcome package applied. You can now log in.',
-        });
+        successMessage = `Registration successful! Welcome package applied. ${successSuffix}`;
       }
 
       if (formData.referralCode.trim()) {
@@ -234,10 +249,7 @@ export function RegistrationCard() {
           refereeEmail: String(newMember.email),
         });
         if (!referral.applied) {
-          setMessage({
-            type: 'error',
-            text: 'Registration succeeded, but referral code was invalid or not applicable.',
-          });
+          successMessage = `${successMessage} Note: your referral code was invalid or not applicable.`;
         }
       }
 
@@ -275,9 +287,18 @@ export function RegistrationCard() {
         referralCode: '',
       });
 
+      setMessage({
+        type: 'success',
+        text: successMessage,
+      });
+
       console.log('Member registered:', newMember);
     } catch (error) {
       console.error('Registration error:', error);
+
+      if (isRateLimitError(error)) {
+        setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
+      }
 
       setMessage({
         type: 'error',
@@ -285,6 +306,7 @@ export function RegistrationCard() {
       });
     } finally {
       setIsSubmitting(false);
+      submitLockRef.current = false;
     }
   };
 
@@ -471,10 +493,10 @@ export function RegistrationCard() {
 
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || isCooldownActive}
               className="w-full bg-[#1bb9d3] text-white py-3.5 rounded-xl hover:bg-[#18a9c0] transition-colors duration-200 mt-6 disabled:opacity-50 disabled:cursor-not-allowed font-semibold shadow-lg shadow-[#1bb9d3]/20"
             >
-              {isSubmitting ? 'Registering...' : 'Create Account'}
+              {isSubmitting ? 'Registering...' : isCooldownActive ? `Try again in ${cooldownSecondsRemaining}s` : 'Create Account'}
             </button>
           </form>
         </div>

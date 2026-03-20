@@ -149,9 +149,6 @@ async function grantWelcomePackageForMember(member: AnyRecord, memberPk: { key: 
   if (existingWelcome) return { granted: false, pointsAdded: 0 };
 
   const rules = await fetchTierRules();
-  const currentBalance = sanitizePointsBalance(member.points_balance ?? 0);
-  const newBalance = currentBalance + WELCOME_PACKAGE_POINTS;
-  const newTier = resolveTier(newBalance, rules);
 
   await insertLoyaltyTransaction({
     member_id: memberPk.value,
@@ -160,11 +157,17 @@ async function grantWelcomePackageForMember(member: AnyRecord, memberPk: { key: 
     reason: WELCOME_PACKAGE_REASON,
   });
 
-  const updateRes = await supabase
+  const refreshedMemberRes = await supabase
     .from("loyalty_members")
-    .update({ points_balance: newBalance, tier: newTier })
-    .eq(memberPk.key, memberPk.value);
-  if (updateRes.error) throw updateRes.error;
+    .select("points_balance,tier")
+    .eq(memberPk.key, memberPk.value)
+    .limit(1)
+    .maybeSingle();
+  if (refreshedMemberRes.error) throw refreshedMemberRes.error;
+  const newBalance = sanitizePointsBalance(refreshedMemberRes.data?.points_balance ?? member.points_balance ?? 0);
+  const newTier = normalizeTierLabel(
+    String(refreshedMemberRes.data?.tier ?? resolveTier(newBalance, rules))
+  ) as SupportedTier;
 
   return { granted: true, pointsAdded: WELCOME_PACKAGE_POINTS, newBalance, newTier };
 }
