@@ -3,8 +3,8 @@ import { supabase } from '../../utils/supabase/client';
 import { ensureWelcomePackage } from '../lib/loyalty-supabase';
 import { applyReferralCodeForSignup } from '../lib/member-lifecycle';
 
-const WELCOME_NOTICE_STORAGE_KEY = 'centralperk-welcome-notice';
 const RATE_LIMIT_COOLDOWN_MS = 60_000;
+const REGISTRATION_COOLDOWN_STORAGE_KEY = 'centralperk-registration-cooldown-until-ms';
 
 interface Member {
   id: string;
@@ -45,6 +45,43 @@ export function RegistrationCard() {
     ? Math.max(0, Math.ceil((cooldownUntilMs - currentTimeMs) / 1000))
     : 0;
   const isCooldownActive = cooldownSecondsRemaining > 0;
+
+  const getDuplicateMessage = (emailExists: boolean, phoneExists: boolean): string | null => {
+    if (emailExists && phoneExists) {
+      return 'A user with that email and phone number already exists.';
+    }
+    if (emailExists) {
+      return 'Duplicate email.';
+    }
+    if (phoneExists) {
+      return 'Duplicate number.';
+    }
+    return null;
+  };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const storedCooldown = window.localStorage.getItem(REGISTRATION_COOLDOWN_STORAGE_KEY);
+    if (!storedCooldown) return;
+
+    const parsedCooldown = Number(storedCooldown);
+    if (!Number.isFinite(parsedCooldown) || parsedCooldown <= Date.now()) {
+      window.localStorage.removeItem(REGISTRATION_COOLDOWN_STORAGE_KEY);
+      return;
+    }
+
+    setCooldownUntilMs(parsedCooldown);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (cooldownUntilMs && cooldownUntilMs > Date.now()) {
+      window.localStorage.setItem(REGISTRATION_COOLDOWN_STORAGE_KEY, String(cooldownUntilMs));
+      return;
+    }
+
+    window.localStorage.removeItem(REGISTRATION_COOLDOWN_STORAGE_KEY);
+  }, [cooldownUntilMs]);
 
   useEffect(() => {
     if (!isCooldownActive) return;
@@ -189,6 +226,7 @@ export function RegistrationCard() {
         }
         throw signUpError;
       }
+      authSignupLikelyCompleted = true;
 
       // Insert member profile after auth signup (or profile-recovery flow).
       const { data: newMember, error: insertError } = await supabase
@@ -280,11 +318,14 @@ export function RegistrationCard() {
         setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
       }
 
+      const baseErrorMessage = buildReadableErrorMessage(error);
+      const safeRecoveryMessage = authSignupLikelyCompleted
+        ? `${PARTIAL_SUCCESS_NOTICE} ${baseErrorMessage}`
+        : baseErrorMessage;
+
       setMessage({
-        type: isPartialSuccess ? 'success' : 'error',
-        text: isPartialSuccess
-          ? `${PARTIAL_SUCCESS_NOTICE} ${buildReadableErrorMessage(error)}`
-          : buildReadableErrorMessage(error),
+        type: authSignupLikelyCompleted ? 'success' : 'error',
+        text: safeRecoveryMessage,
       });
     } finally {
       setIsSubmitting(false);
